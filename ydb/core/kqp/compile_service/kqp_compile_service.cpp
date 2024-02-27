@@ -495,6 +495,7 @@ private:
         auto indexAutoChooser = TableServiceConfig.GetIndexAutoChooseMode();
 
         ui64 rangesLimit = TableServiceConfig.GetExtractPredicateRangesLimit();
+        ui64 idxLookupPointsLimit = TableServiceConfig.GetIdxLookupJoinPointsLimit();
 
         bool enableSequences = TableServiceConfig.GetEnableSequences();
         bool enableColumnsWithDefault = TableServiceConfig.GetEnableColumnsWithDefault();
@@ -527,7 +528,8 @@ private:
             TableServiceConfig.GetEnableOlapSink() != enableOlapSink ||
             TableServiceConfig.GetEnableCreateTableAs() != enableCreateTableAs ||
             TableServiceConfig.GetExtractPredicateRangesLimit() != rangesLimit ||
-            TableServiceConfig.GetResourceManager().GetMkqlHeavyProgramMemoryLimit() != mkqlHeavyLimit) {
+            TableServiceConfig.GetResourceManager().GetMkqlHeavyProgramMemoryLimit() != mkqlHeavyLimit ||
+            TableServiceConfig.GetIdxLookupJoinPointsLimit() != idxLookupPointsLimit) {
 
             QueryCache.Clear();
 
