@@ -78,4 +78,8 @@ NYql::NNodes::TExprBase KqpTopSortOverExtend(NYql::NNodes::TExprBase node, NYql:
 NYql::NNodes::TExprBase KqpUpsertRowsInputRewrite(NYql::NNodes::TExprBase node, NYql::TExprContext& ctx,
     const TKqpOptimizeContext& kqpCtx);
 
+NYql::NNodes::TCoLambda MakeFilterForRange(NYql::NNodes::TKqlKeyRange range, NYql::TExprContext& ctx, NYql::TPositionHandle pos, TVector<TString> keyColumns);
+
+bool ExtractUsedFields(const NYql::TExprNode::TPtr& start, const NYql::TExprNode& arg, TSet<TString>& usedFields, const NYql::TParentsMap& parentsMap, bool allowDependsOn);
+
 } // namespace NKikimr::NKqp::NOpt
