@@ -45,6 +45,225 @@ TExprBase MakeLE(TExprBase left, TExprBase right, TExprContext& ctx, TPositionHa
         .Done();
 }
 
+TCoAtomList MakeAllColumnsList(const NYql::TKikimrTableDescription & tableDesc, TExprContext& ctx, TPositionHandle pos) {
+    TVector<TCoAtom> columns;
+    for (auto& [column, _] : tableDesc.Metadata->Columns) {
+        columns.push_back(Build<TCoAtom>(ctx, pos).Value(column).Done());
+    }
+    return Build<TCoAtomList>(ctx, pos).Add(columns).Done();
+};
+
+TMaybe<TPrefixLookup> RewriteReadToPrefixLookup(TKqlReadTableBase read, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx) {
+    TString lookupTable;
+    TString indexName;
+
+    TMaybeNode<TCoAtomList> lookupColumns;
+    size_t prefixSize;
+    TMaybeNode<TExprBase> prefixExpr;
+    TMaybeNode<TCoLambda> extraFilter;
+    TMaybe<TSet<TString>> usedColumns;
+
+    if (!read.template Maybe<TKqlReadTable>() && !read.template Maybe<TKqlReadTableIndex>()) {
+        return {};
+    }
+
+    if (!read.Table().SysView().Value().empty()) {
+        // Can't lookup in system views
+        return {};
+    }
+
+    if (auto indexRead = read.template Maybe<TKqlReadTableIndex>()) {
+        indexName = indexRead.Cast().Index().StringValue();
+        lookupTable = GetIndexMetadata(indexRead.Cast(), *kqpCtx.Tables, kqpCtx.Cluster)->Name;
+    } else {
+        lookupTable = read.Table().Path().StringValue();
+    }
+    const auto& rightTableDesc = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, lookupTable);
+    const auto& mainTableDesc = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, read.Table().Path().StringValue());
+
+    auto from = read.Range().From();
+    auto to = read.Range().To();
+
+    usedColumns.ConstructInPlace();
+    prefixSize = 0;
+    while (prefixSize < from.ArgCount() && prefixSize < to.ArgCount()) {
+        if (from.Arg(prefixSize).Raw() != to.Arg(prefixSize).Raw()) {
+            break;
+        }
+        usedColumns->insert(rightTableDesc.Metadata->KeyColumnNames[prefixSize]);
+        ++prefixSize;
+    }
+
+    lookupColumns = read.Columns();
+
+    // we don't need to make filter for point selection
+    if (!(prefixSize == from.ArgCount() &&
+         prefixSize == to.ArgCount() && 
+         from.template Maybe<TKqlKeyInc>() &&
+         to.template Maybe<TKqlKeyInc>()))
+    {
+        extraFilter = MakeFilterForRange(read.Range(), ctx, read.Range().Pos(), rightTableDesc.Metadata->KeyColumnNames);
+        lookupColumns = MakeAllColumnsList(mainTableDesc, ctx, read.Pos());
+    }
+
+    TVector<TExprBase> columns;
+    for (size_t i = 0; i < prefixSize; ++i) {
+        columns.push_back(TExprBase(from.Arg(i)));
+    }
+
+    prefixExpr = Build<TCoAsList>(ctx, read.Pos())
+        .Add<TExprList>()
+            .Add(columns)
+            .Build()
+        .Done();
+
+    Y_ENSURE(prefixExpr.IsValid());
+
+    return NKikimr::NKqp::NOpt::TPrefixLookup {
+        .LookupColumns = lookupColumns.Cast(),
+        .ResultColumns = read.Columns(),
+
+        .Filter = extraFilter,
+        .FilterUsedColumnsHint = usedColumns,
+
+        .PrefixSize = prefixSize,
+        .PrefixExpr = prefixExpr.Cast(),
+
+        .LookupTableName = lookupTable,
+        .MainTable = read.Table(),
+        .IndexName = indexName,
+    };
+}
+
+TMaybe<TPrefixLookup> RewriteReadToPrefixLookup(TKqlReadTableRangesBase read, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx, TMaybe<size_t> maxKeys) {
+    TString lookupTable;
+    TString indexName;
+
+    TMaybeNode<TCoAtomList> lookupColumns;
+    size_t prefixSize;
+    TMaybeNode<TExprBase> prefixExpr;
+    TMaybeNode<TCoLambda> extraFilter;
+    TMaybe<TSet<TString>> usedColumns;
+
+    if (!read.template Maybe<TKqlReadTableRanges>() && !read.template Maybe<TKqlReadTableIndexRanges>()) {
+        return {};
+    }
+
+    if (!read.Table().SysView().Value().empty()) {
+        // Can't lookup in system views
+        return {};
+    }
+
+    lookupColumns = read.Columns();
+
+    if (auto indexRead = read.template Maybe<TKqlReadTableIndexRanges>()) {
+        const auto& tableDesc = GetTableData(*kqpCtx.Tables, kqpCtx.Cluster, read.Table().Path());
+        const auto& [indexMeta, _ ] = tableDesc.Metadata->GetIndexMetadata(indexRead.Index().Cast().StringValue());
+        lookupTable = indexMeta->Name;
+        indexName = indexRead.Cast().Index().StringValue();
+    } else {
+        lookupTable = read.Table().Path().StringValue();
+    }
+
+    if (TCoVoid::Match(read.Ranges().Raw())) {
+        prefixSize = 0;
+        prefixExpr = Build<TCoJust>(ctx, read.Pos())
+            .Input<TCoAsList>().Build()
+            .Done();
+    } else {
+        auto prompt = TKqpReadTableExplainPrompt::Parse(read);
+
+        prefixSize = prompt.PointPrefixLen;
+
+        const auto& rightTableDesc = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, lookupTable);
+        const auto& mainTableDesc = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, read.Table().Path().StringValue());
+
+        TMaybeNode<TExprBase> rowsExpr;
+        TMaybeNode<TCoLambda> filter;
+        TMaybeNode<TCoAtomList> usedColumnsList;
+        if (read.Maybe<TKqlReadTableRanges>()) {
+            rowsExpr = read.Cast<TKqlReadTableRanges>().PrefixPointsExpr();
+            filter = read.Cast<TKqlReadTableRanges>().PredicateExpr();
+            usedColumnsList = read.Cast<TKqlReadTableRanges>().PredicateUsedColumns();
+        }
+        if (read.Maybe<TKqlReadTableIndexRanges>()) {
+            rowsExpr = read.Cast<TKqlReadTableIndexRanges>().PrefixPointsExpr();
+            filter = read.Cast<TKqlReadTableIndexRanges>().PredicateExpr();
+            usedColumnsList = read.Cast<TKqlReadTableIndexRanges>().PredicateUsedColumns();
+        }
+
+        if (!rowsExpr.IsValid()) {
+            return {};
+        }
+
+        if (maxKeys && (!prompt.ExpectedMaxRanges || *prompt.ExpectedMaxRanges > *maxKeys)) {
+            return {};
+        }
+
+        // we don't need to make filter for point selection
+        if (prompt.PointPrefixLen != prompt.UsedKeyColumns.size()) {
+            if (!filter.IsValid() || !usedColumnsList.IsValid()) {
+                return {};
+            }
+            usedColumns.ConstructInPlace();
+            for (auto&& column :  usedColumnsList.Cast()) {
+                usedColumns->insert(column.StringValue());
+            }
+            extraFilter = filter;
+            lookupColumns = MakeAllColumnsList(mainTableDesc, ctx, read.Pos());
+        }
+
+        size_t prefixLen = prompt.PointPrefixLen;
+        TVector<TString> keyColumns;
+        for (size_t i = 0; i < prefixLen; ++i) {
+            YQL_ENSURE(i < rightTableDesc.Metadata->KeyColumnNames.size());
+            keyColumns.push_back(rightTableDesc.Metadata->KeyColumnNames[i]);
+        }
+
+
+        auto rowArg = Build<TCoArgument>(ctx, read.Pos())
+            .Name("rowArg")
+            .Done();
+
+        TVector<TExprBase> components;
+        for (auto column : keyColumns) {
+            TCoAtom columnAtom(ctx.NewAtom(read.Ranges().Pos(), column));
+            components.push_back(
+                Build<TCoMember>(ctx, read.Ranges().Pos())
+                    .Struct(rowArg)
+                    .Name(columnAtom)
+                    .Done());
+        }
+
+        prefixExpr = Build<TCoMap>(ctx, read.Pos())
+            .Input(rowsExpr.Cast())
+            .Lambda()
+                .Args({rowArg})
+                .Body<TExprList>()
+                    .Add(components)
+                    .Build()
+                .Build()
+            .Done();
+    }
+
+    Y_ENSURE(prefixExpr.IsValid());
+
+    return TPrefixLookup{
+        .LookupColumns = lookupColumns.Cast(),
+        .ResultColumns = read.Columns(),
+
+        .Filter = extraFilter,
+        .FilterUsedColumnsHint = usedColumns,
+
+        .PrefixSize = prefixSize,
+        .PrefixExpr = prefixExpr.Cast(),
+
+        .LookupTableName = lookupTable,
+        .MainTable = read.Table(),
+        .IndexName = indexName,
+    };
+}
+
 } // namespace
 
 TCoLambda MakeFilterForRange(TKqlKeyRange range, TExprContext& ctx, TPositionHandle pos, TVector<TString> keyColumns) {
@@ -251,6 +470,19 @@ TMaybe<TKqpMatchReadResult> MatchRead(TExprBase node, std::function<bool(TExprBa
         .SkipNullMembers = skipNullMembers,
         .FlatMap = flatmap
     };
+}
+
+TMaybe<TPrefixLookup> RewriteReadToPrefixLookup(TExprBase read, TExprContext& ctx, const TKqpOptimizeContext& kqpCtx, TMaybe<size_t> maxKeys) {
+    if (maxKeys == TMaybe<size_t>(0)) {
+        return {};
+    }
+    if (auto readTable = read.Maybe<TKqlReadTableBase>()) {
+        return RewriteReadToPrefixLookup(readTable.Cast(), ctx, kqpCtx);
+    } else {
+        auto readRanges = read.Maybe<TKqlReadTableRangesBase>();
+        YQL_ENSURE(readRanges);
+        return RewriteReadToPrefixLookup(readRanges.Cast(), ctx, kqpCtx, maxKeys);
+    }
 }
 
 } // namespace NKikimr::NKqp::NOpt

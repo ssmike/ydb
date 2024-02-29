@@ -22,10 +22,10 @@ NYql::NNodes::TExprBase KqpPushPredicateToReadTable(NYql::NNodes::TExprBase node
     const TKqpOptimizeContext &kqpCtx);
 
 NYql::NNodes::TExprBase KqpPushExtractedPredicateToReadTable(NYql::NNodes::TExprBase node, NYql::TExprContext& ctx,
-    const TKqpOptimizeContext& kqpCtx, NYql::TTypeAnnotationContext& typesCtx);
+    const TKqpOptimizeContext& kqpCtx, NYql::TTypeAnnotationContext& typesCtx, const NYql::TParentsMap& parentsMap);
 
 NYql::NNodes::TExprBase KqpJoinToIndexLookup(const NYql::NNodes::TExprBase& node, NYql::TExprContext& ctx,
-    const TKqpOptimizeContext& kqpCtx, const NYql::TParentsMap & parentsMap);
+    const TKqpOptimizeContext& kqpCtx);
 
 NYql::NNodes::TExprBase KqpRewriteSqlInToEquiJoin(const NYql::NNodes::TExprBase& node, NYql::TExprContext& ctx,
     const TKqpOptimizeContext& kqpCtx, const NYql::TKikimrConfiguration::TPtr& config);
@@ -77,9 +77,5 @@ NYql::NNodes::TExprBase KqpTopSortOverExtend(NYql::NNodes::TExprBase node, NYql:
 
 NYql::NNodes::TExprBase KqpUpsertRowsInputRewrite(NYql::NNodes::TExprBase node, NYql::TExprContext& ctx,
     const TKqpOptimizeContext& kqpCtx);
-
-NYql::NNodes::TCoLambda MakeFilterForRange(NYql::NNodes::TKqlKeyRange range, NYql::TExprContext& ctx, NYql::TPositionHandle pos, TVector<TString> keyColumns);
-
-bool ExtractUsedFields(const NYql::TExprNode::TPtr& start, const NYql::TExprNode& arg, TSet<TString>& usedFields, const NYql::TParentsMap& parentsMap, bool allowDependsOn);
 
 } // namespace NKikimr::NKqp::NOpt
