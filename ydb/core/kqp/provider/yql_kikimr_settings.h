@@ -144,27 +144,29 @@ struct TKikimrConfiguration : public TKikimrSettings, public NCommon::TSettingDi
     NKikimrConfig::TFeatureFlags FeatureFlags;
 
     bool EnableKqpScanQuerySourceRead = false;
-    bool EnableKqpDataQuerySourceRead = false;
+    bool EnableKqpDataQuerySourceRead = true;
     bool EnableKqpScanQueryStreamLookup = false;
     bool EnableKqpDataQueryStreamLookup = false;
     bool EnableKqpScanQueryStreamIdxLookupJoin = false;
     bool EnableKqpDataQueryStreamIdxLookupJoin = false;
     bool EnablePredicateExtractForScanQuery = true;
-    bool EnablePredicateExtractForDataQuery = false;
-    bool PredicateExtract20 = false;
+    bool EnablePredicateExtractForDataQuery = true;
+    bool PredicateExtract20 = true;
     bool EnableKqpImmediateEffects = false;
-    bool EnableSequentialReads = false;
-    bool EnablePreparedDdl = false;
-    bool EnableSequences = false;
+    bool EnableSequentialReads = true;
+    bool EnablePreparedDdl = true;
+    bool EnableSequences = true;
     bool EnableColumnsWithDefault = false;
     NSQLTranslation::EBindingsMode BindingsMode = NSQLTranslation::EBindingsMode::ENABLED;
-    NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode IndexAutoChooserMode;
+    NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode IndexAutoChooserMode = static_cast<NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode>(0);
     bool EnableAstCache = false;
     bool EnablePgConstsToParams = false;
     ui64 ExtractPredicateRangesLimit = 0;
     bool EnablePerStatementQueryExecution = false;
     bool EnableCreateTableAs = false;
     ui64 IdxLookupJoinsPrefixPointLimit = 1;
+
+    bool OldJoinsBehavior = false;
 };
 
 }

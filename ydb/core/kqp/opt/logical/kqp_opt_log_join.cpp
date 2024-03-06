@@ -560,7 +560,7 @@ TMaybeNode<TExprBase> KqpJoinToIndexLookupImpl(const TDqJoin& join, TExprContext
         return {};
     }
 
-    if (!kqpCtx.Config->PredicateExtract20 && prefixLookup->Filter.IsValid()) {
+    if ((!kqpCtx.Config->PredicateExtract20 || kqpCtx.Config->OldJoinsBehavior) && prefixLookup->Filter.IsValid()) {
         return {};
     }
 
@@ -619,7 +619,7 @@ TMaybeNode<TExprBase> KqpJoinToIndexLookupImpl(const TDqJoin& join, TExprContext
                             .Build()
                         .Done());
                 deduplicateLeftColumns.insert(*leftColumn);
-                if (!kqpCtx.Config->PredicateExtract20) {
+                if (!kqpCtx.Config->PredicateExtract20 || kqpCtx.Config->OldJoinsBehavior) {
                     return {};
                 }
             }
