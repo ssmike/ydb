@@ -224,6 +224,7 @@ public:
         , ModuleResolverState(moduleResolverState)
         , KqpSettings()
         , Config(MakeIntrusive<TKikimrConfiguration>())
+        , ConfigOld(MakeIntrusive<TKikimrConfiguration>())
         , FunctionRegistry(functionRegistry)
         , AlignedPagePoolCounters()
         , ReplayDetails(std::move(replayDetails))
@@ -267,8 +268,10 @@ public:
         GUCSettings->ImportFromJson(ReplayDetails);
 
         Config->Init(KqpSettings.DefaultSettings.GetDefaultSettings(), ReplayDetails["query_cluster"].GetStringSafe(), KqpSettings.Settings, false);
+        ConfigOld->Init(KqpSettings.DefaultSettings.GetDefaultSettings(), ReplayDetails["query_cluster"].GetStringSafe(), KqpSettings.Settings, false);
         if (!Query->Database.empty()) {
             Config->_KqpTablePathPrefix = ReplayDetails["query_database"].GetStringSafe();
+            ConfigOld->_KqpTablePathPrefix = ReplayDetails["query_database"].GetStringSafe();
         }
 
         ui32 syntax = (ReplayDetails["query_syntax"].GetStringSafe() == "1") ? 1 : 0;
@@ -276,7 +279,11 @@ public:
             syntax = 1;
         }
 	Config->_KqpYqlSyntaxVersion = syntax;
+        Config->OldLookupJoinBehaviour = false;
         Config->FreezeDefaults();
+        ConfigOld->OldLookupJoinBehaviour = true;
+        ConfigOld->_KqpYqlSyntaxVersion = syntax;
+        ConfigOld->FreezeDefaults();
     }
 
     void Bootstrap() {
@@ -293,10 +300,13 @@ public:
         auto federatedQuerySetup = std::make_optional<TKqpFederatedQuerySetup>({NYql::IHTTPGateway::Make(), nullptr, nullptr, nullptr, {}, {}, {}, nullptr, nullptr});
         KqpHost = CreateKqpHost(Gateway, Query->Cluster, Query->Database, Config, ModuleResolverState->ModuleResolver,
             federatedQuerySetup, nullptr, GUCSettings, Nothing(), FunctionRegistry, false);
+        KqpHostOld = CreateKqpHost(Gateway, Query->Cluster, Query->Database, ConfigOld, ModuleResolverState->ModuleResolver,
+            federatedQuerySetup, nullptr, GUCSettings, Nothing(), FunctionRegistry, false);
 
         IKqpHost::TPrepareSettings prepareSettings;
         prepareSettings.DocumentApiRestricted = false;
         AsyncCompileResult = KqpHost->PrepareDataQuery(Query->Text, prepareSettings);
+        AsyncCompileResultOld = KqpHostOld->PrepareDataQuery(Query->Text, prepareSettings);
         Continue();
 
         Schedule(TDuration::Seconds(60), new TEvents::TEvWakeup());
@@ -325,13 +335,26 @@ private:
     void Continue() {
         TActorSystem* actorSystem = TlsActivationContext->ExecutorThread.ActorSystem;
         TActorId selfId = SelfId();
-        auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
-            bool finished = future.GetValue();
-            auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(0, finished);
-            actorSystem->Send(selfId, processEv.Release());
-        };
+        if (Stopped) {
+            Stopped = false;
+            auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
+                bool finished = future.GetValue();
+                auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(0, finished);
+                actorSystem->Send(selfId, processEv.Release());
+            };
 
-        AsyncCompileResult->Continue().Apply(callback);
+            AsyncCompileResult->Continue().Apply(callback);
+        } 
+        if (OldStopped) {
+            OldStopped = false;
+            auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
+                bool finished = future.GetValue();
+                auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(1, finished);
+                actorSystem->Send(selfId, processEv.Release());
+            };
+
+            AsyncCompileResultOld->Continue().Apply(callback);
+        }
     }
 
     NJson::TJsonValue ExtractQueryPlan(const TString& plan) {
@@ -492,8 +515,7 @@ private:
         return {TQueryReplayEvents::UncategorizedPlanMismatch, ""};
     }
 
-    std::pair<TQueryReplayEvents::TCheckQueryPlanStatus, TString> CheckQueryPlan(const NJson::TJsonValue& newEnginePlan) {
-        NJson::TJsonValue oldEnginePlan = ExtractQueryPlan(ReplayDetails["query_plan"].GetStringSafe());
+    std::pair<TQueryReplayEvents::TCheckQueryPlanStatus, TString> CheckQueryPlan(const NJson::TJsonValue& newEnginePlan, const NJson::TJsonValue& oldEnginePlan) {
         const auto oldEngineStats = ExtractTableStats(oldEnginePlan);
         const auto newEngineStats = ExtractTableStats(newEnginePlan);
 
@@ -519,17 +541,15 @@ private:
         Reply(status, {issue});
     }
 
-    void Reply(const Ydb::StatusIds::StatusCode& status, const TIssues& issues, const std::optional<TString>& queryPlan = std::nullopt) {
+    void Reply(const Ydb::StatusIds::StatusCode& status, const TIssues& issues, const std::optional<TString>& queryPlan = std::nullopt, const std::optional<TString>& oldQueryPlan = std::nullopt) {
         std::unique_ptr<TQueryReplayEvents::TEvCompileResponse> ev = std::make_unique<TQueryReplayEvents::TEvCompileResponse>(true);
-        Y_UNUSED(queryPlan);
-        if (status != Ydb::StatusIds::SUCCESS) {
+        if (!queryPlan || !oldQueryPlan) {
             ev->Success = false;
             ev->Status = status == Ydb::StatusIds::TIMEOUT ? TQueryReplayEvents::CompileTimeout : TQueryReplayEvents::CompileError;
             ev->Message = issues.ToString();
             Cerr << "Failed to compile query: " << ev->Message << Endl;
-            WriteJsonData("-repro.txt", ReplayDetails);
         } else {
-            std::tie(ev->Status, ev->Message) = CheckQueryPlan(ExtractQueryPlan(*queryPlan));
+            std::tie(ev->Status, ev->Message) = CheckQueryPlan(ExtractQueryPlan(*queryPlan), ExtractQueryPlan(*oldQueryPlan));
         }
 
         Send(Owner, ev.release());
@@ -567,25 +587,46 @@ private:
     }
 
     void Handle(TEvKqp::TEvContinueProcess::TPtr& ev) {
-        Y_ENSURE(!ev->Get()->QueryId);
+        if (ev->Get()->QueryId == 0) {
+            if (ev->Get()->Finished) {
+                Finished = true;
+            } else {
+                Stopped = true;
+            }
+        }
+
+        if (ev->Get()->QueryId == 1) {
+            if (ev->Get()->Finished) {
+                OldFinished = true;
+            } else {
+                OldStopped = true;
+            }
+        }
 
         TYqlLogScope logScope(TlsActivationContext->AsActorContext(), NKikimrServices::KQP_YQL, YqlName, "");
 
-        if (!ev->Get()->Finished) {
+        if (!OldFinished || !Finished) {
             Continue();
             return;
         }
 
         auto kqpResult = AsyncCompileResult->GetResult();
         auto status = GetYdbStatus(kqpResult);
+        auto oldKqpResult = AsyncCompileResultOld->GetResult();
+        auto oldStatus = GetYdbStatus(oldKqpResult);
 
         std::optional<TString> queryPlan;
+        std::optional<TString> oldQueryPlan;
 
         if (status == Ydb::StatusIds::SUCCESS) {
             queryPlan = std::move(kqpResult.QueryPlan);
         }
 
-        Reply(status, kqpResult.Issues(), queryPlan);
+        if (oldStatus == Ydb::StatusIds::SUCCESS) {
+            oldQueryPlan = std::move(oldKqpResult.QueryPlan);
+        }
+
+        Reply(status, kqpResult.Issues(), queryPlan, oldQueryPlan);
     }
 
     void HandleTimeout() {
@@ -600,14 +641,23 @@ private:
     TGUCSettings::TPtr GUCSettings = std::make_shared<TGUCSettings>();
     TKqpSettings KqpSettings;
     TKikimrConfiguration::TPtr Config;
+    TKikimrConfiguration::TPtr ConfigOld;
     TIntrusivePtr<IKqpGateway> Gateway;
     TIntrusivePtr<IKqpHost> KqpHost;
+    TIntrusivePtr<IKqpHost> KqpHostOld;
     TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncCompileResult;
+    TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncCompileResultOld;
     const NMiniKQL::IFunctionRegistry* FunctionRegistry;
     TAlignedPagePoolCounters AlignedPagePoolCounters;
     std::shared_ptr<TMetadataInfoHolder> TableMetadata;
     TActorId MiniKQLCompileService;
     NJson::TJsonValue ReplayDetails;
+
+    bool Stopped = true;
+    bool OldStopped = true;
+
+    bool Finished = false;
+    bool OldFinished = false;
 };
 
 IActor* CreateQueryCompiler(
