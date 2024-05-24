@@ -4,6 +4,9 @@
 
 
 #include <ydb/library/actors/core/actor_bootstrapped.h>
+#include <ydb/library/yql/dq/actors/compute/dq_sync_compute_actor_base.h>
+
+#include <ydb/core/kqp/common/simple/kqp_event_ids.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -67,14 +70,17 @@ private:
 };
 
 class TSchedulerEntityHandle {
-    friend class TComputeScheduler;
+public:
+    TSchedulerEntityHandle() {}
+    ~TSchedulerEntityHandle() {}
 
-    TSchedulerEntityHandle(){}
+private:
+    friend class TComputeScheduler;
 
     struct TGroupRecord {
         double Weight;
         double Now = 0;
-        TInstant LastNowRecalc;
+        TMonotonic LastNowRecalc;
         bool Disabled = false;
         double EntitiesWeight = 0;
     };
@@ -97,11 +103,9 @@ private:
 
     static constexpr double MinPriority = 1e-8;
 public:
-    TComputeScheduler(double cores)
-        : CoresScaleFactor(cores)
-    {}
+    TComputeScheduler(){}
 
-    void SetPriorities(THashMap<TString, double> priorities) {
+    void SetPriorities(THashMap<TString, double> priorities, double cores) {
         double sum = 0;
         for (auto [_, v] : priorities) {
             sum += v;
@@ -109,7 +113,7 @@ public:
         for (auto& [k, v] : Groups) {
             auto ptr = priorities.FindPtr(k);
             if (ptr) {
-                v->Next()->Weight = ((*ptr) * CoresScaleFactor) / sum;
+                v->Next()->Weight = ((*ptr) * cores) / sum;
                 v->Next()->Disabled = false;
             } else {
                 v->Next()->Weight = 0;
@@ -120,26 +124,26 @@ public:
         for (auto& [k, v] : priorities) {
             if (!Groups.contains(k)) {
                 auto group = std::make_unique<TMultithreadPublisher<TSchedulerEntityHandle::TGroupRecord>>();
-                group->Next()->LastNowRecalc = TInstant::Now();
-                group->Next()->Weight = (v * CoresScaleFactor) / sum;
+                group->Next()->LastNowRecalc = TMonotonic::Now();
+                group->Next()->Weight = (v * cores) / sum;
                 group->Publish();
                 Groups[k] = std::move(group);
             }
         }
     }
 
-    TSchedulerEntityHandle Enroll(TString group, double weight) {
+    std::unique_ptr<TSchedulerEntityHandle> Enroll(TString group, double weight) {
         Y_ENSURE(Groups.contains(group), "unknown scheduler group");
         auto* groupEntry = Groups[group].get();
-        TSchedulerEntityHandle result;
-        result.Group = groupEntry;
-        result.Weight = weight;
-        result.Vstart = groupEntry->Next()->Now;
+        auto result = std::make_unique<TSchedulerEntityHandle>();
+        result->Group = groupEntry;
+        result->Weight = weight;
+        result->Vstart = groupEntry->Next()->Now;
         groupEntry->Next()->EntitiesWeight += weight;
         return result;
     }
 
-    void RecalcNow(TInstant now) {
+    void AdvanceTime(TMonotonic now) {
         for (auto& [_, v] : Groups) {
             {
                 auto group = v.get()->Current();
@@ -161,10 +165,10 @@ public:
         self.Vruntime += FromDuration(time) / self.Weight;
     }
 
-    TMaybe<TDuration> CalcDelay(TSchedulerEntityHandle& self, TInstant now) {
+    TMaybe<TDuration> CalcDelay(TSchedulerEntityHandle& self, TMonotonic now) {
         auto group = self.Group->Current();
         Y_ENSURE(!group.get()->Disabled);
-        auto lagTime = (self.Vruntime - group.get()->Now) * group.get()->EntitiesWeight / group.get()->Weight;
+        auto lagTime = (self.Vruntime - (group.get()->Now - self.Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
         auto neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
         if (neededTime <= 0) {
             return Nothing();
@@ -175,8 +179,69 @@ public:
 
 private:
     THashMap<TString, std::unique_ptr<TMultithreadPublisher<TSchedulerEntityHandle::TGroupRecord>>> Groups;
-    double CoresScaleFactor;
+};
+
+struct TComputeActorCpuPriorityOptions {
+    TComputeScheduler* Scheduler = nullptr;
+    TString Group = "";
+    double Weight = 1;
+    NActors::TActorId NodeService;
+};
+
+struct TEvFinishKqpTask : public TEventLocal<TEvFinishKqpTask, TKqpEvents::EKqpEvents::EvFinishKqpTasks> {
+    const ui64 TxId;
+    const ui64 TaskId;
+    const bool Success;
+    const NYql::TIssues Issues;
+
+    std::unique_ptr<TSchedulerEntityHandle> SchedulerEntity;
+
+    TEvFinishKqpTask(ui64 txId, ui64 taskId, bool success, const NYql::TIssues& issues = {})
+        : TxId(txId)
+        , TaskId(taskId)
+        , Success(success)
+        , Issues(issues) {}
+};
+
+
+template<typename TDerived>
+class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<TDerived> {
+private:
+    using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
+
+public:
+    template<typename... TArgs>
+    TSchedulableComputeActorBase(TArgs&&... args, TComputeActorCpuPriorityOptions options = {})
+        : TBase(std::forward<TArgs>(args)...)
+        , Scheduler(options.Scheduler)
+    {
+        if (Scheduler) {
+            SelfHandle = Scheduler->Enroll(options.Group, options.Weight);
+        }
+    }
+
+protected:
+    void DoExecuteImpl() override {
+        auto start = NActors::TlsActivationContext->Monotonic();
+        auto* stats = TBase::GetTaskRunnerStats();
+        TBase::DoExecuteImpl();
+        Scheduler->TrackTime(*SelfHandle, NActors::TlsActivationContext->Monotonic() - start);
+    }
+
+    void PassAway() override {
+        auto finishEv = MakeHolder<TEvFinishKqpTask>();
+        finishEv->TxId = this->GetTxId();
+        finishEv->TaskId = this->GetTask().GetId();
+        finishEv->SchedulerEntity = std::move(SelfHandle);
+        this->Send(NodeService, finishEv.Release());
+        TBase::PassAway();
+    }
+
+private:
+    TComputeScheduler* Scheduler;
+    std::unique_ptr<TSchedulerEntityHandle> SelfHandle;
+    NActors::TActorId NodeService;
 };
 
 } // namespace NKqp
-} // namespace NKikimr
+} // namespace NKikimR
