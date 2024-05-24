@@ -14,6 +14,7 @@
 #include <ydb/core/kqp/rm_service/kqp_rm_service.h>
 #include <ydb/core/kqp/runtime/kqp_read_actor.h>
 #include <ydb/core/kqp/runtime/kqp_read_iterator_common.h>
+#include <ydb/core/kqp/runtime/kqp_compute_scheduler.h>
 #include <ydb/core/kqp/common/kqp_resolve.h>
 
 #include <ydb/library/wilson_ids/wilson.h>
@@ -178,9 +179,10 @@ public:
 
 private:
     STATEFN(WorkState) {
+        Scheduler.AdvanceTime(TlsActivationContext->Monotonic());
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpNode::TEvStartKqpTasksRequest, HandleWork);
-            hFunc(TEvKqpNode::TEvFinishKqpTask, HandleWork); // used only for unit tests
+            hFunc(TEvFinishKqpTask, HandleWork); // used only for unit tests
             hFunc(TEvKqpNode::TEvCancelKqpTasksRequest, HandleWork);
             hFunc(TEvents::TEvWakeup, HandleWork);
             // misc
@@ -535,8 +537,11 @@ private:
     }
 
     // used only for unit tests
-    void HandleWork(TEvKqpNode::TEvFinishKqpTask::TPtr& ev) {
+    void HandleWork(TEvFinishKqpTask::TPtr& ev) {
         auto& msg = *ev->Get();
+        if (msg.SchedulerEntity) {
+            Scheduler.Deregister(*msg.SchedulerEntity);
+        }
         FinishKqpTask(msg.TxId, msg.TaskId, msg.Success, GetStateBucketByTx(Buckets, msg.TxId), GetKqpResourceManager());
     }
 
@@ -726,6 +731,8 @@ private:
     std::shared_ptr<NRm::IKqpResourceManager> ResourceManager_;
     NYql::NDq::IDqAsyncIoFactory::TPtr AsyncIoFactory;
     const std::optional<TKqpFederatedQuerySetup> FederatedQuerySetup;
+
+    TComputeScheduler Scheduler;
 
     //state sharded by TxId
     std::shared_ptr<TBucketArray> Buckets;

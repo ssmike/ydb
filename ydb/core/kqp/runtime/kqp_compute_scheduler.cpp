@@ -3,6 +3,5 @@
 namespace NKikimr {
 namespace NKqp {
 
-
 } // namespace NKqp
 } // namespace NKikimr
