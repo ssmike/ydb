@@ -172,12 +172,12 @@ public:
         }
     }
 
-    void Bootstrap() override {
-        //if (!NoThrottle) {
-        //    this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
-        //}
-        TBase::Bootstrap();
-    }
+    //void Bootstrap() override {
+    //    //if (!NoThrottle) {
+    //    //    this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
+    //    //}
+    //    TBase::Bootstrap();
+    //}
 
     void HandleWork(TEvSchedulerReniceConfirm::TPtr& ev) {
         SelfHandle = std::move(ev->Get()->SchedulerEntity);
