@@ -165,7 +165,7 @@ public:
         if (tag == ResumeWakeupTag) {
             TBase::DoExecute();
         } else if (tag == ReniceWakeupTag) {
-            auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), Group, Weight);
+            auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), Weight, Group);
             this->Send(NodeService, renice.Release());
         } else {
             TBase::HandleExecuteBase(ev);
