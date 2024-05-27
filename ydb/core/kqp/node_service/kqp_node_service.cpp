@@ -201,6 +201,7 @@ private:
             hFunc(NMon::TEvHttpInfo, HandleWork);
             // sheduling
             hFunc(TEvSchedulerDeregister, HandleWork);
+            hFunc(TEvSchedulerRenice, HandleWork);
             default: {
                 Y_ABORT("Unexpected event 0x%x for TKqpResourceManagerService", ev->GetTypeRewrite());
             }
@@ -288,6 +289,14 @@ static constexpr double SecToUsec = 1e6;
 
     void HandleWork(TEvSchedulerDeregister::TPtr& ev) {
         Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+    }
+
+    void HandleWork(TEvSchedulerRenice::TPtr& ev) {
+        auto now = TlsActivationContext->Monotonic();
+        Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
+        auto handle = Scheduler.Enroll(ev->Get()->DesiredGroup, ev->Get()->DesiredWeight, now);
+        auto reniceConfirm = MakeHolder<TEvSchedulerReniceConfirm>(std::move(handle));
+        this->Send(ev->Sender, reniceConfirm.Release());
     }
 
     void HandleWork(TEvKqpNode::TEvStartKqpTasksRequest::TPtr& ev) {

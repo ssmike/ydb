@@ -173,9 +173,9 @@ public:
     }
 
     void Bootstrap() override {
-        if (!NoThrottle) {
-            this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
-        }
+        //if (!NoThrottle) {
+        //    this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
+        //}
         TBase::Bootstrap();
     }
 
