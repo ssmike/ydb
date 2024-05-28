@@ -236,10 +236,18 @@ private:
             auto& taskCtx = request.InFlyTasks[dqTask.GetId()];
             YQL_ENSURE(taskCtx.TaskId != 0);
 
+            TComputeActorSchedulingOptions schedulingOptions {
+                .NodeService = SelfId(),
+                .Scheduler = &Scheduler,
+                .Group = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::SCAN ? "olap" : "",
+                .Weight = 1,
+                .NoThrottle = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA,
+            };
+
             taskCtx.ComputeActorId = CaFactory()->CreateKqpComputeActor(
                 request.Executer, txId, &dqTask, runtimeSettingsBase,
                 NWilson::TTraceId(ev->TraceId), ev->Get()->Arena, serializedGUCSettings, computesByStage,
-                msg.GetOutputChunkMaxSize(), State_, memoryPool, tasksCount);
+                msg.GetOutputChunkMaxSize(), State_, memoryPool, tasksCount, std::move(schedulingOptions));
 
             LOG_D("TxId: " << txId << ", executing task: " << taskCtx.TaskId << " on compute actor: " << taskCtx.ComputeActorId);
 

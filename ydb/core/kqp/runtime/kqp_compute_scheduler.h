@@ -17,16 +17,12 @@ private:
     std::unique_ptr<TSchedulerEntity> Ptr;
 
 public:
-    TSchedulerEntityHandle(std::unique_ptr<TSchedulerEntity> ptr)
-        : Ptr(std::move(ptr))
-    {
-    }
+    TSchedulerEntityHandle(TSchedulerEntity*);
 
-    TSchedulerEntityHandle() = default;
-    TSchedulerEntityHandle(TSchedulerEntityHandle&) = default; 
-    TSchedulerEntityHandle(TSchedulerEntityHandle&&) = default; 
+    TSchedulerEntityHandle();
+    TSchedulerEntityHandle(TSchedulerEntityHandle&&); 
 
-    TSchedulerEntityHandle& operator = (TSchedulerEntityHandle&&) = default;
+    TSchedulerEntityHandle& operator = (TSchedulerEntityHandle&&);
 
     operator bool () {
         return Ptr.get() != nullptr;
@@ -61,7 +57,7 @@ private:
     std::unique_ptr<TImpl> Impl;
 };
 
-struct TComputeActorCpuPriorityOptions {
+struct TComputeActorSchedulingOptions {
     NActors::TActorId NodeService;
     TComputeScheduler* Scheduler = nullptr;
     TString Group = "";
@@ -92,7 +88,7 @@ private:
 
 public:
     template<typename... TArgs>
-    TSchedulableComputeActorBase(TArgs&&... args, TComputeActorCpuPriorityOptions options = {})
+    TSchedulableComputeActorBase(TComputeActorSchedulingOptions options, TArgs&&... args)
         : TBase(std::forward<TArgs>(args)...)
         , Scheduler(options.Scheduler)
         , NoThrottle(options.NoThrottle)
@@ -102,22 +98,13 @@ public:
         }
     }
 
-    enum EEvWakeupTag : ui64 {
-        ResumeTag = 201
-    };
-
-    void HandleEvWakeup(EEvWakeupTag tag) {
-        if (tag == ResumeTag) {
-            TBase::Start();
-        } else {
-            CA_LOG_E("Unhandled wakeup tag " << (ui64)tag);
-        }
-    }
+    static constexpr ui64 ResumeWakeupTag = 201;
 
     void HandleWakeup(NActors::TEvents::TEvWakeup::TPtr& ev) {
-        auto tag = (EEvWakeupTag) ev->Get()->Tag;
-        if (tag == EEvWakeupTag::ResumeTag) {
-            TBase::Start();
+        auto tag = ev->Get()->Tag;
+        if (tag == ResumeWakeupTag) {
+            //TBase::Start();
+            TBase::DoExecute();
         } else {
             TBase::HandleExecuteBase(ev);
         }
@@ -143,24 +130,22 @@ protected:
         }
         TMonotonic now;
         if (NoThrottle || !delay) {
-            auto* stats = TBase::GetTaskRunnerStats();
+            //auto* stats = TBase::GetTaskRunnerStats();
             TBase::DoExecuteImpl();
             now = NActors::TlsActivationContext->Monotonic();
             Scheduler->TrackTime(*SelfHandle, now - start);
-            delay = Scheduler->CalcDelay(*SelfHandle, start);
+            delay = Scheduler->CalcDelay(*SelfHandle, now);
         } else {
             now = NActors::TlsActivationContext->Monotonic();
         }
         if (delay) {
-            TBase::Stop();
-            this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(EEvWakeupTag::ResumeTag));
+            //TBase::Stop();
+            this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
     }
 
     void PassAway() override {
-        auto finishEv = MakeHolder<TEvFinishKqpTask>();
-        finishEv->TxId = this->GetTxId();
-        finishEv->TaskId = this->GetTask().GetId();
+        auto finishEv = MakeHolder<TEvFinishKqpTask>(std::get<ui64>(this->GetTxId()), this->GetTask().GetId(), true);
         finishEv->SchedulerEntity = std::move(SelfHandle);
         this->Send(NodeService, finishEv.Release());
         TBase::PassAway();

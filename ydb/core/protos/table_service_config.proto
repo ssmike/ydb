@@ -291,4 +291,10 @@ message TTableServiceConfig {
     optional EBlockChannelsMode BlockChannelsMode = 61 [default = BLOCK_CHANNELS_SCALAR];
     
     optional uint64 QueryReplayCacheUploadTTLSec = 62 [default = 36000];
+
+    message TComputePoolConfiguration {
+        optional string Name = 1;
+        optional double Weight = 2;
+    };
+    repeated TComputePoolConfiguration PoolsConfiguration = 63;
 };
