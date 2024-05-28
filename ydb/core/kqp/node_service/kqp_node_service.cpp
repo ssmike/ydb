@@ -491,12 +491,21 @@ private:
                 tableKind = tableKindExtract(meta);
             }
 
+            TComputeActorSchedulingOptions schedulingOptions {
+                .NodeService = SelfId(),
+                .Scheduler = &Scheduler,
+                .Group = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::SCAN ? "olap" : "",
+                .Weight = 1,
+                .NoThrottle = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA,
+            };
+
             IActor* computeActor;
             if (tableKind == ETableKind::Datashard || tableKind == ETableKind::Olap) {
                 auto& info = computesByStage.UpsertTaskWithScan(dqTask, meta, !AppData()->FeatureFlags.GetEnableSeparationComputeActorsFromRead());
                 computeActor = CreateKqpScanComputeActor(request.Executer, txId, &dqTask,
                     AsyncIoFactory, runtimeSettings, memoryLimits,
-                    NWilson::TTraceId(ev->TraceId), ev->Get()->Arena);
+                    NWilson::TTraceId(ev->TraceId), ev->Get()->Arena,
+                    schedulingOptions);
                 taskCtx.ComputeActorId = Register(computeActor);
                 info.MutableActorIds().emplace_back(taskCtx.ComputeActorId);
             } else {
@@ -506,7 +515,8 @@ private:
                 }
                 if (Y_LIKELY(!CaFactory)) {
                     computeActor = CreateKqpComputeActor(request.Executer, txId, &dqTask, AsyncIoFactory,
-                        runtimeSettings, memoryLimits, NWilson::TTraceId(ev->TraceId), ev->Get()->Arena, FederatedQuerySetup, GUCSettings);
+                        runtimeSettings, memoryLimits, NWilson::TTraceId(ev->TraceId), ev->Get()->Arena, FederatedQuerySetup, GUCSettings,
+                        schedulingOptions);
                     taskCtx.ComputeActorId = Register(computeActor);
                 } else {
                     computeActor = CaFactory->CreateKqpComputeActor(request.Executer, txId, &dqTask,

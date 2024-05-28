@@ -74,6 +74,17 @@ private:
     T Slots[2];
 };
 
+TSchedulerEntityHandle::TSchedulerEntityHandle(TSchedulerEntity* ptr)
+    : Ptr(std::move(ptr))
+{
+}
+
+TSchedulerEntityHandle::TSchedulerEntityHandle(){} 
+
+TSchedulerEntityHandle::TSchedulerEntityHandle(TSchedulerEntityHandle&&) = default; 
+
+TSchedulerEntityHandle& TSchedulerEntityHandle::operator = (TSchedulerEntityHandle&&) = default;
+
 TSchedulerEntityHandle::~TSchedulerEntityHandle() = default;
 
 class TSchedulerEntity {
@@ -143,7 +154,7 @@ TSchedulerEntityHandle TComputeScheduler::Enroll(TString group, double weight) {
     result->Weight = weight;
     result->Vstart = groupEntry->Next()->Now;
     groupEntry->Next()->EntitiesWeight += weight;
-    return TSchedulerEntityHandle(std::move(result));
+    return TSchedulerEntityHandle(result.release());
 }
 
 void TComputeScheduler::AdvanceTime(TMonotonic now) {
