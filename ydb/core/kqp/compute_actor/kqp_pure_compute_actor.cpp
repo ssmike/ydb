@@ -121,9 +121,11 @@ void TKqpComputeActor::DoBootstrap() {
 
     ContinueExecute();
     Become(&TKqpComputeActor::StateFunc);
+
 }
 
 STFUNC(TKqpComputeActor::StateFunc) {
+    CA_LOG_D("CA StateFunc " << ev->GetTypeRewrite());
     try {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpCompute::TEvScanInitActor, HandleExecute);

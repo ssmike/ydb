@@ -75,15 +75,21 @@ private:
 };
 
 TSchedulerEntityHandle::TSchedulerEntityHandle(TSchedulerEntity* ptr)
-    : Ptr(std::move(ptr))
+    : Ptr(ptr)
 {
 }
 
 TSchedulerEntityHandle::TSchedulerEntityHandle(){} 
 
-TSchedulerEntityHandle::TSchedulerEntityHandle(TSchedulerEntityHandle&&) = default; 
+TSchedulerEntityHandle::TSchedulerEntityHandle(TSchedulerEntityHandle&& other)
+    : Ptr(other.Ptr.release())
+{
+}
 
-TSchedulerEntityHandle& TSchedulerEntityHandle::operator = (TSchedulerEntityHandle&&) = default;
+TSchedulerEntityHandle& TSchedulerEntityHandle::operator = (TSchedulerEntityHandle&& other) {
+    Ptr.swap(other.Ptr);
+    return *this;
+}
 
 TSchedulerEntityHandle::~TSchedulerEntityHandle() = default;
 
