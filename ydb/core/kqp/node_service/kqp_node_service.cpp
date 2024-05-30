@@ -173,6 +173,11 @@ public:
                 TlsActivationContext->ExecutorThread.ActorSystem, SelfId());
         }
 
+        THashMap<TString, double> priorities;
+        priorities[""] = 1e-10;
+        priorities["olap"] = 0.5;
+        Scheduler.SetPriorities(priorities, 1);
+
         Schedule(TDuration::Seconds(1), new TEvents::TEvWakeup());
         Become(&TKqpNodeService::WorkState);
     }

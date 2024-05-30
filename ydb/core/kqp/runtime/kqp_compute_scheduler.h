@@ -5,6 +5,7 @@
 
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/yql/dq/actors/compute/dq_sync_compute_actor_base.h>
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor_log.h>
 
 #include <ydb/core/kqp/common/simple/kqp_event_ids.h>
 
@@ -30,6 +31,10 @@ public:
 
     TSchedulerEntity& operator*() {
         return *Ptr;
+    }
+
+    TString printable() {
+        return TStringBuilder() << (size_t)Ptr.get();
     }
 
     ~TSchedulerEntityHandle();
@@ -102,6 +107,7 @@ public:
 
     void HandleWakeup(NActors::TEvents::TEvWakeup::TPtr& ev) {
         auto tag = ev->Get()->Tag;
+        CA_LOG_D("wakeup with tag " << tag);
         if (tag == ResumeWakeupTag) {
             //TBase::Start();
             TBase::DoExecute();
@@ -113,38 +119,46 @@ public:
 
     STFUNC(BaseStateFuncBody) {
         switch (ev->GetTypeRewrite()) {
-            switch (ev->GetTypeRewrite()) {
-                hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
-                default:
-                    TBase::BaseStateFuncBody(ev);
-            }
+            hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
+            default:
+                TBase::BaseStateFuncBody(ev);
         }
     }
 
 protected:
     void DoExecuteImpl() override {
-        auto start = NActors::TlsActivationContext->Monotonic();
-        TMaybe<TDuration> delay;
-        if (SelfHandle) {
-            delay = Scheduler->CalcDelay(*SelfHandle, start);
+        if (!SelfHandle) {
+            CA_LOG_D("execute because there is no handle");
+            return TBase::DoExecuteImpl();
         }
+        ExecuteStart = NActors::TlsActivationContext->Monotonic();
+        TMaybe<TDuration> delay = Scheduler->CalcDelay(*SelfHandle, *ExecuteStart);
         TMonotonic now;
         if (NoThrottle || !delay) {
-            //auto* stats = TBase::GetTaskRunnerStats();
+            CA_LOG_D("execute because there is no delay");
             TBase::DoExecuteImpl();
+            if (Finished) {
+                return;
+            }
             now = NActors::TlsActivationContext->Monotonic();
-            Scheduler->TrackTime(*SelfHandle, now - start);
+            Scheduler->TrackTime(*SelfHandle, now - *ExecuteStart);
             delay = Scheduler->CalcDelay(*SelfHandle, now);
         } else {
+            CA_LOG_D("don't execute because of a lag");
             now = NActors::TlsActivationContext->Monotonic();
         }
         if (delay) {
-            //TBase::Stop();
+            CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec");
             this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
+        ExecuteStart.Clear();
     }
 
     void PassAway() override {
+        Finished = true;
+        if (ExecuteStart && SelfHandle) {
+            Scheduler->TrackTime(*SelfHandle, NActors::TlsActivationContext->Monotonic() - *ExecuteStart);
+        }
         auto finishEv = MakeHolder<TEvFinishKqpTask>(std::get<ui64>(this->GetTxId()), this->GetTask().GetId(), true);
         finishEv->SchedulerEntity = std::move(SelfHandle);
         this->Send(NodeService, finishEv.Release());
@@ -152,10 +166,12 @@ protected:
     }
 
 private:
+    TMaybe<TMonotonic> ExecuteStart;
     TComputeScheduler* Scheduler;
     TSchedulerEntityHandle SelfHandle;
     NActors::TActorId NodeService;
     bool NoThrottle;
+    bool Finished = false;
 };
 
 } // namespace NKqp
