@@ -155,6 +155,9 @@ public:
         if (config.HasIteratorReadQuotaSettings()) {
             SetIteratorReadsQuotaSettings(config.GetIteratorReadQuotaSettings());
         }
+        if (config.HasComputePoolsConfiguration()) {
+            SetPriorities(config.GetComputePoolsConfiguration());
+        }
     }
 
     void Bootstrap() {
@@ -172,11 +175,6 @@ public:
             mon->RegisterActorPage(actorsMonPage, "kqp_node", "KQP Node", false,
                 TlsActivationContext->ExecutorThread.ActorSystem, SelfId());
         }
-
-        THashMap<TString, double> priorities;
-        priorities[""] = 1e-10;
-        priorities["olap"] = 0.5;
-        Scheduler.SetPriorities(priorities, 1);
 
         Schedule(TDuration::Seconds(1), new TEvents::TEvWakeup());
         Become(&TKqpNodeService::WorkState);
@@ -501,7 +499,7 @@ private:
                 .Scheduler = &Scheduler,
                 .Group = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::SCAN ? "olap" : "",
                 .Weight = 1,
-                .NoThrottle = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA,
+                .NoThrottle = false//msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA,
             };
 
             IActor* computeActor;
@@ -645,12 +643,24 @@ private:
             SetIteratorReadsQuotaSettings(event.GetConfig().GetTableServiceConfig().GetIteratorReadQuotaSettings());
         }
 
+        if (event.GetConfig().GetTableServiceConfig().HasComputePoolsConfiguration()) {
+            SetPriorities(event.GetConfig().GetTableServiceConfig().GetComputePoolsConfiguration());
+        }
+
         auto responseEv = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationResponse>(event);
         Send(ev->Sender, responseEv.Release(), IEventHandle::FlagTrackDelivery, ev->Cookie);
     }
 
     void SetIteratorReadsQuotaSettings(const NKikimrConfig::TTableServiceConfig::TIteratorReadQuotaSettings& settings) {
         SetDefaultIteratorQuotaSettings(settings.GetMaxRows(), settings.GetMaxBytes());
+    }
+
+    void SetPriorities(const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration& conf) {
+        std::function<TComputeScheduler::TDistributionRule(const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration&)> convert
+            = [](const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration&)
+        {
+        };
+        Scheduler.SetPriorities(convert(conf), 1, TlsActivationContext->Monotonic());
     }
 
     void SetIteratorReadsRetrySettings(const NKikimrConfig::TTableServiceConfig::TIteratorReadsRetrySettings& settings) {
