@@ -292,9 +292,17 @@ message TTableServiceConfig {
     
     optional uint64 QueryReplayCacheUploadTTLSec = 62 [default = 36000];
 
-    message TComputePoolConfiguration {
-        optional string Name = 1;
-        optional double Weight = 2;
+    message TSubPoolsConfiguration {
+        repeated TComputePoolConfiguration SubPools = 1;
     };
-    repeated TComputePoolConfiguration PoolsConfiguration = 63;
+
+    message TComputePoolConfiguration {
+        optional double MaxCpuShare = 1;
+        oneof ResourceConfiguration {
+            string Name = 2;
+            TSubPoolsConfiguration SubPoolsConfiguration = 3;
+        }
+    };
+
+    optional TComputePoolConfiguration ComputePoolsConfiguration = 63;
 };

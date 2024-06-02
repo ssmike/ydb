@@ -33,19 +33,24 @@ public:
         return *Ptr;
     }
 
-    TString printable() {
-        return TStringBuilder() << (size_t)Ptr.get();
-    }
+    double VRuntime();
 
     ~TSchedulerEntityHandle();
 };
 
 class TComputeScheduler {
 public:
+    struct TDistributionRule {
+        double Share;
+        TString Name;
+        TVector<TDistributionRule> SubRules;
+    };
+
+public:
     TComputeScheduler();
     ~TComputeScheduler();
 
-    void SetPriorities(THashMap<TString, double> priorities, double cores);
+    void SetPriorities(TDistributionRule rootRule, double cores, TMonotonic now);
 
     TSchedulerEntityHandle Enroll(TString group, double weight);
 
@@ -54,6 +59,8 @@ public:
     void Deregister(TSchedulerEntity& self);
 
     void TrackTime(TSchedulerEntity& self, TDuration time);
+
+    double GroupNow(TSchedulerEntity& self, TMonotonic now);
 
     TMaybe<TDuration> CalcDelay(TSchedulerEntity& self, TMonotonic now);
 
@@ -90,6 +97,8 @@ template<typename TDerived>
 class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<TDerived> {
 private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
+
+    static constexpr TDuration MaxDelay = TDuration::Seconds(1);
 
 public:
     template<typename... TArgs>
@@ -128,14 +137,12 @@ public:
 protected:
     void DoExecuteImpl() override {
         if (!SelfHandle) {
-            CA_LOG_D("execute because there is no handle");
             return TBase::DoExecuteImpl();
         }
         ExecuteStart = NActors::TlsActivationContext->Monotonic();
         TMaybe<TDuration> delay = Scheduler->CalcDelay(*SelfHandle, *ExecuteStart);
-        TMonotonic now;
+        TMonotonic now = *ExecuteStart;
         if (NoThrottle || !delay) {
-            CA_LOG_D("execute because there is no delay");
             TBase::DoExecuteImpl();
             if (Finished) {
                 return;
@@ -143,12 +150,12 @@ protected:
             now = NActors::TlsActivationContext->Monotonic();
             Scheduler->TrackTime(*SelfHandle, now - *ExecuteStart);
             delay = Scheduler->CalcDelay(*SelfHandle, now);
-        } else {
-            CA_LOG_D("don't execute because of a lag");
-            now = NActors::TlsActivationContext->Monotonic();
         }
         if (delay) {
-            CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec");
+            if (*delay > MaxDelay) {
+                delay = MaxDelay;
+            }
+            CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec ");
             this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
         ExecuteStart.Clear();
