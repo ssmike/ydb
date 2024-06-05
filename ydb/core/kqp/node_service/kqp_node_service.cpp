@@ -305,7 +305,7 @@ private:
             }
         }
         if (msg.SchedulerEntity) {
-            Scheduler.Deregister(*msg.SchedulerEntity);
+            Scheduler.Deregister(*msg.SchedulerEntity, TlsActivationContext->Monotonic());
         }
     }
 
