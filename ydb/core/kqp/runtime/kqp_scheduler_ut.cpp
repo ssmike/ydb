@@ -14,8 +14,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         TDuration Cuanta;
     };
 
-    TVector<TDuration> RunSimulation(TComputeScheduler& scheduler, TVector<TProcess> processes, TDuration time, size_t executionUnits) {
-        auto start = TMonotonic::Now();
+    TVector<TDuration> RunSimulation(TComputeScheduler& scheduler, TVector<TProcess> processes, TDuration time, size_t executionUnits, TMonotonic start) {
         TMonotonic now = start;
         TMonotonic deadline = now + time;
         scheduler.AdvanceTime(now);
@@ -38,7 +37,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         TVector<double> groupnow(processes.size());
 
         for (size_t i = 0; i < processes.size(); ++i) {
-            handles[i] =  scheduler.Enroll(processes[i].Group, processes[i].Weight);
+            handles[i] =  scheduler.Enroll(processes[i].Group, processes[i].Weight, now);
             runQueue.push_back(i);
         }
 
@@ -106,14 +105,16 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
 
     Y_UNIT_TEST(SingleCoreSimple) {
         NKikimr::NKqp::TComputeScheduler scheduler;
-        THashMap<TString, double> priorities;
-        priorities["first"] = 1;
-        priorities["second"] = 1;
-        scheduler.SetPriorities(priorities, 1);
+        auto start = TMonotonic::Now();
+
+        TComputeScheduler::TDistributionRule rule;
+        rule.SubRules.push_back({.Share = 1, .Name = "first"});
+        rule.SubRules.push_back({.Share = 1, .Name = "second"});
+        scheduler.SetPriorities(rule, 1, start);
 
         TDuration all = TDuration::Seconds(10);
 
-        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 1, TDuration::MilliSeconds(10)}}, all, 1);
+        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 1, TDuration::MilliSeconds(10)}}, all, 1, start);
 
         for (auto t : result) {
             AssertEq(t, all/4, TDuration::MilliSeconds(20));
@@ -122,15 +123,16 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
 
     Y_UNIT_TEST(SingleCoreThird) {
         NKikimr::NKqp::TComputeScheduler scheduler;
-        THashMap<TString, double> priorities;
-        priorities["first"] = 1;
-        priorities["second"] = 1;
-        scheduler.SetPriorities(priorities, 1);
+        auto start = TMonotonic::Now();
+
+        TComputeScheduler::TDistributionRule rule;
+        rule.SubRules.push_back({.Share = 1, .Name = "first"});
+        rule.SubRules.push_back({.Share = 1, .Name = "second"});
+        scheduler.SetPriorities(rule, 1, start);
 
         TDuration all = TDuration::Seconds(10);
 
-
-        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 2, TDuration::MilliSeconds(10)}}, all, 1);
+        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 2, TDuration::MilliSeconds(10)}}, all, 1, start);
         all = all/2;
 
         Cerr << result[0].MicroSeconds() << " " << result[1].MicroSeconds() << Endl;
@@ -140,15 +142,16 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
 
     Y_UNIT_TEST(SingleCoreForth) {
         NKikimr::NKqp::TComputeScheduler scheduler;
-        THashMap<TString, double> priorities;
-        priorities["first"] = 1;
-        priorities["second"] = 1;
-        scheduler.SetPriorities(priorities, 1);
+        TComputeScheduler::TDistributionRule rule;
+        auto start = TMonotonic::Now();
+        rule.SubRules.push_back({.Share = 1, .Name = "first"});
+        rule.SubRules.push_back({.Share = 1, .Name = "second"});
+
+        scheduler.SetPriorities(rule, 1, start);
 
         TDuration all = TDuration::Seconds(10);
 
-
-        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 3, TDuration::MilliSeconds(10)}}, all, 1);
+        auto result = RunSimulation(scheduler, {{"first", 1, TDuration::MilliSeconds(10)}, {"first", 3, TDuration::MilliSeconds(10)}}, all, 1, start);
         all = all/2;
 
         Cerr << result[0].MicroSeconds() << " " << result[1].MicroSeconds() << Endl;
