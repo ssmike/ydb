@@ -44,6 +44,10 @@ public:
         double Share;
         TString Name;
         TVector<TDistributionRule> SubRules;
+
+        bool empty() {
+            return SubRules.empty() && Name.empty();
+        }
     };
 
 public:
@@ -52,7 +56,7 @@ public:
 
     void SetPriorities(TDistributionRule rootRule, double cores, TMonotonic now);
 
-    TSchedulerEntityHandle Enroll(TString group, double weight);
+    TSchedulerEntityHandle Enroll(TString group, double weight, TMonotonic now);
 
     void AdvanceTime(TMonotonic now);
 
@@ -70,6 +74,7 @@ private:
 };
 
 struct TComputeActorSchedulingOptions {
+    TMonotonic Now;
     NActors::TActorId NodeService;
     TComputeScheduler* Scheduler = nullptr;
     TString Group = "";
@@ -98,7 +103,7 @@ class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<T
 private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
 
-    static constexpr TDuration MaxDelay = TDuration::Seconds(1);
+    static constexpr TDuration MaxDelay = TDuration::MilliSeconds(60);
 
 public:
     template<typename... TArgs>
@@ -108,7 +113,7 @@ public:
         , NoThrottle(options.NoThrottle)
     {
         if (Scheduler) {
-            SelfHandle = Scheduler->Enroll(options.Group, options.Weight);
+            SelfHandle = Scheduler->Enroll(options.Group, options.Weight, options.Now);
         }
     }
 

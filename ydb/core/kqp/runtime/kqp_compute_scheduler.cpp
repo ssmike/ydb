@@ -9,7 +9,7 @@ namespace {
         return TDuration::MicroSeconds(t);
     }
 
-    static constexpr double MinPriority = 1e-8;
+    static constexpr double MinEntitiesWeight = 1e-8;
 
 }
 
@@ -126,26 +126,45 @@ struct TComputeScheduler::TImpl {
 
     struct TRule {
         size_t Parent;
-        double Weight;
+        double Weight = 0;
 
+        double Share;
         TMaybe<size_t> RecordId = {};
         double SubRulesSum = 0;
         bool Empty = true;
     };
-    size_t RootRule;
     std::vector<TRule> Rules;
 
     double SumCores;
 
-    void AssignWeights(TMonotonic now) {
+    void AssignWeights() {
+        ssize_t rootRule = static_cast<ssize_t>(Rules.size()) - 1;
         for (size_t i = 0; i < Rules.size(); ++i) {
+            Rules[i].SubRulesSum = 0;
+            Rules[i].Empty = true;
+        }
+        for (ssize_t i = 0; i < static_cast<ssize_t>(Rules.size()); ++i) {
             if (Rules[i].RecordId) {
-                if (Records[*Rules[i].RecordId]->Next()->EntitiesWeight < MinPriority) { // mincores
-                }
-            } else {
+                Rules[i].Empty = Records[*Rules[i].RecordId]->Next()->EntitiesWeight < MinEntitiesWeight;
+            }
+            if (i != rootRule && !Rules[i].Empty) {
+                Rules[Rules[i].Parent].Empty = false;
+                Rules[Rules[i].Parent].SubRulesSum += Rules[i].Weight;
             }
         }
-    }
+        for (ssize_t i = static_cast<ssize_t>(Rules.size()) - 1; i >= 0; --i) {
+            if (i == static_cast<ssize_t>(Rules.size()) - 1) {
+                Rules[i].Weight = SumCores * Rules[i].Share;
+            } else if (!Rules[i].Empty) {
+                Rules[i].Weight = Rules[Rules[i].Parent].Weight * Rules[i].Share / Rules[i].SubRulesSum;
+            } else {
+                Rules[i].Weight = 0;
+            }
+            if (Rules[i].RecordId) {
+                Records[*Rules[i].RecordId]->Next()->Weight = Rules[i].Weight;
+            }
+        }
+     }
 };
 
 TComputeScheduler::TComputeScheduler() {
@@ -178,7 +197,7 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
     }
     for (auto& [k, v] : Impl->PoolId) {
         if (!seenNames.contains(k)) {
-            auto* group = Impl->Records[Impl->PoolId[v]].get();
+            auto* group = Impl->Records[Impl->PoolId[k]].get();
             group->Next()->Weight = 0;
             group->Next()->Disabled = true;
             group->Publish();
@@ -191,14 +210,14 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
         size_t result;
         if (rule.SubRules.empty()) {
             result = rules.size();
-            rules.push_back(TImpl::TRule{.Weight = rule.Share, .RecordId=Impl->PoolId[rule.Name]});
+            rules.push_back(TImpl::TRule{.Share = rule.Share, .RecordId=Impl->PoolId[rule.Name]});
         } else {
             TVector<size_t> toAssign;
             for (auto& subRule : rule.SubRules) {
                 toAssign.push_back(makeRules(subRule));
             }
             size_t result = rules.size();
-            rules.push_back(TImpl::TRule{.Weight = rule.Share});
+            rules.push_back(TImpl::TRule{.Share = rule.Share});
             for (auto i : toAssign) {
                 rules[i].Parent = result;
             }
@@ -206,48 +225,12 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
         }
         return result;
     };
-    Impl->RootRule = makeRules(rule);
     Impl->Rules.swap(rules);
 
-    //    if (ptr) {
-    //        v->Next()->Weight = ((*ptr) * cores) / sum;
-    //        v->Next()->Disabled = false;
-    //    } else {
-    //        v->Next()->Weight = 0;
-    //        v->Next()->Disabled = true;
-    //    }
-    //    v->Publish();
-    //}
-
-    Impl->AssignWeights(now);
+    Impl->AssignWeights();
     for (auto& record : Impl->Records) {
         record->Publish();
     }
-
-    //double sum = 0;
-    //for (auto [_, v] : priorities) {
-    //    sum += v;
-    //}
-    //for (auto& [k, v] : Impl->Groups) {
-    //    auto ptr = priorities.FindPtr(k);
-    //    if (ptr) {
-    //        v->Next()->Weight = ((*ptr) * cores) / sum;
-    //        v->Next()->Disabled = false;
-    //    } else {
-    //        v->Next()->Weight = 0;
-    //        v->Next()->Disabled = true;
-    //    }
-    //    v->Publish();
-    //}
-    //for (auto& [k, v] : priorities) {
-    //    if (!Impl->Groups.contains(k)) {
-    //        auto group = ;
-    //        group->Next()->LastNowRecalc = TMonotonic::Now();
-    //        group->Next()->Weight = (v * cores) / sum;
-    //        group->Publish();
-    //        Impl->Groups[k] = std::move(group);
-    //    }
-    //}
 }
 
 
@@ -257,15 +240,20 @@ double TComputeScheduler::GroupNow(TSchedulerEntity& self, TMonotonic now) {
 }
 
 
-TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weight) {
-    Y_ENSURE(Impl->Groups.contains(groupName), "unknown scheduler group");
-    auto* groupEntry = Impl->Groups[groupName].get();
+TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weight, TMonotonic now) {
+    Y_ENSURE(Impl->PoolId.contains(groupName), "unknown scheduler group");
+    auto* groupEntry = Impl->Records[Impl->PoolId.at(groupName)].get();
     auto group = groupEntry->Current();
     auto result = std::make_unique<TSchedulerEntity>();
     result->Group = groupEntry;
     result->Weight = weight;
     result->Vstart = group.get()->Now;
-    groupEntry->Next()->EntitiesWeight += weight;
+    if (groupEntry->Next()->EntitiesWeight < MinEntitiesWeight) {
+        groupEntry->Next()->EntitiesWeight += weight;
+        AdvanceTime(now);
+    } else {
+        groupEntry->Next()->EntitiesWeight += weight;
+    }
     return TSchedulerEntityHandle(result.release());
 }
 
@@ -274,7 +262,7 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
     for (auto& v : Impl->Records) {
         {
             auto group = v.get()->Current();
-            if (!group.get()->Disabled && group.get()->EntitiesWeight > MinPriority) {
+            if (!group.get()->Disabled && group.get()->EntitiesWeight > MinEntitiesWeight) {
                 v.get()->Next()->Now += FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
             v.get()->Next()->LastNowRecalc = now;

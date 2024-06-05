@@ -103,7 +103,9 @@ public:
 
 private:
     STATEFN(WorkState) {
-        Scheduler.AdvanceTime(TlsActivationContext->Monotonic());
+        Y_DEFER {
+            Scheduler.AdvanceTime(TlsActivationContext->Monotonic());
+        };
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpNode::TEvStartKqpTasksRequest, HandleWork);
             hFunc(TEvFinishKqpTask, HandleWork); // used only for unit tests
@@ -232,6 +234,8 @@ private:
         const TString& serializedGUCSettings = ev->Get()->Record.HasSerializedGUCSettings() ?
             ev->Get()->Record.GetSerializedGUCSettings() : "";
 
+        auto schedulerNow = TlsActivationContext->Monotonic();
+
         // start compute actors
         const ui32 tasksCount = msg.GetTasks().size();
         for (int i = 0; i < msg.GetTasks().size(); ++i) {
@@ -240,12 +244,18 @@ private:
             YQL_ENSURE(taskCtx.TaskId != 0);
 
             TComputeActorSchedulingOptions schedulingOptions {
+                .Now = schedulerNow,
                 .NodeService = SelfId(),
                 .Scheduler = &Scheduler,
                 .Group = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::SCAN ? "olap" : "",
                 .Weight = 1,
-                .NoThrottle = false//msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA,
+                .NoThrottle = false,
             };
+
+            if (msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA) {
+                schedulingOptions.NoThrottle = true;
+                schedulingOptions.Scheduler = nullptr;
+            }
 
             taskCtx.ComputeActorId = CaFactory()->CreateKqpComputeActor(
                 request.Executer, txId, &dqTask, runtimeSettingsBase,
@@ -386,10 +396,25 @@ private:
 
     void SetPriorities(const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration& conf) {
         std::function<TComputeScheduler::TDistributionRule(const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration&)> convert
-            = [](const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration&)
+            = [&](const NKikimrConfig::TTableServiceConfig::TComputePoolConfiguration& conf)
         {
+            if (conf.HasName()) {
+                return TComputeScheduler::TDistributionRule{.Share = conf.GetMaxCpuShare(), .Name = conf.GetName()};
+            } else if (conf.HasSubPoolsConfiguration()) {
+                auto res = TComputeScheduler::TDistributionRule{.Share = conf.GetMaxCpuShare()};
+                for (auto& subConf : conf.GetSubPoolsConfiguration().GetSubPools()) {
+                    res.SubRules.push_back(convert(subConf));
+                }
+                return res;
+            } else {
+                Y_ENSURE(false, "unknown case");
+            }
         };
-        Scheduler.SetPriorities(convert(conf), 1, TlsActivationContext->Monotonic());
+        auto converted = convert(conf);
+
+        auto threads = TlsActivationContext->ActorSystem()->GetPoolThreadsCount(SelfId().PoolID());
+        Y_ENSURE(threads.has_value());
+        Scheduler.SetPriorities(converted.empty() ? TComputeScheduler::TDistributionRule{.Share = 1, .Name = "olap"} : converted, threads.value(), TlsActivationContext->Monotonic());
     }
 
     void SetIteratorReadsRetrySettings(const NKikimrConfig::TTableServiceConfig::TIteratorReadsRetrySettings& settings) {
