@@ -60,7 +60,7 @@ public:
 
     void AdvanceTime(TMonotonic now);
 
-    void Deregister(TSchedulerEntity& self);
+    void Deregister(TSchedulerEntity& self, TMonotonic now);
 
     void TrackTime(TSchedulerEntity& self, TDuration time);
 

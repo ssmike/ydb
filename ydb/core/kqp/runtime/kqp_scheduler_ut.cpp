@@ -45,8 +45,8 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
             size_t toRun = executionUnits;
             for (size_t i = 0; i < processes.size(); ++i) {
                 groupnow[i] = scheduler.GroupNow(*handles[i], now);
-                //Cerr << " " << scheduler.Now(*handles[i]) << "<" << scheduler.GroupNow(*handles[i]);
-                UNIT_ASSERT(handles[i].VRuntime() <= scheduler.GroupNow(*handles[i], now)   + (processes[i].Cuanta / processes[i].Weight).MicroSeconds());
+                Cerr << " " << handles[i].VRuntime() << "<" << scheduler.GroupNow(*handles[i], now) << " + " << (processes[i].Cuanta.MicroSeconds() / processes[i].Weight);
+                UNIT_ASSERT(handles[i].VRuntime() <= scheduler.GroupNow(*handles[i], now)   + (processes[i].Cuanta.MicroSeconds() / processes[i].Weight));
             }
             Cerr << Endl;
 
@@ -107,7 +107,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         NKikimr::NKqp::TComputeScheduler scheduler;
         auto start = TMonotonic::Now();
 
-        TComputeScheduler::TDistributionRule rule;
+        TComputeScheduler::TDistributionRule rule{.Share = 0.5};
         rule.SubRules.push_back({.Share = 1, .Name = "first"});
         rule.SubRules.push_back({.Share = 1, .Name = "second"});
         scheduler.SetPriorities(rule, 1, start);
@@ -125,7 +125,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         NKikimr::NKqp::TComputeScheduler scheduler;
         auto start = TMonotonic::Now();
 
-        TComputeScheduler::TDistributionRule rule;
+        TComputeScheduler::TDistributionRule rule{.Share = 0.5};
         rule.SubRules.push_back({.Share = 1, .Name = "first"});
         rule.SubRules.push_back({.Share = 1, .Name = "second"});
         scheduler.SetPriorities(rule, 1, start);
@@ -142,7 +142,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
 
     Y_UNIT_TEST(SingleCoreForth) {
         NKikimr::NKqp::TComputeScheduler scheduler;
-        TComputeScheduler::TDistributionRule rule;
+        TComputeScheduler::TDistributionRule rule{.Share = 0.5};
         auto start = TMonotonic::Now();
         rule.SubRules.push_back({.Share = 1, .Name = "first"});
         rule.SubRules.push_back({.Share = 1, .Name = "second"});

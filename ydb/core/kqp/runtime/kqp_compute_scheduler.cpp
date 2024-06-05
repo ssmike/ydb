@@ -146,17 +146,18 @@ struct TComputeScheduler::TImpl {
         for (ssize_t i = 0; i < static_cast<ssize_t>(Rules.size()); ++i) {
             if (Rules[i].RecordId) {
                 Rules[i].Empty = Records[*Rules[i].RecordId]->Next()->EntitiesWeight < MinEntitiesWeight;
+                Rules[i].SubRulesSum = Rules[i].Share;
             }
             if (i != rootRule && !Rules[i].Empty) {
                 Rules[Rules[i].Parent].Empty = false;
-                Rules[Rules[i].Parent].SubRulesSum += Rules[i].Weight;
+                Rules[Rules[i].Parent].SubRulesSum += Rules[i].SubRulesSum;
             }
         }
         for (ssize_t i = static_cast<ssize_t>(Rules.size()) - 1; i >= 0; --i) {
             if (i == static_cast<ssize_t>(Rules.size()) - 1) {
                 Rules[i].Weight = SumCores * Rules[i].Share;
             } else if (!Rules[i].Empty) {
-                Rules[i].Weight = Rules[Rules[i].Parent].Weight * Rules[i].Share / Rules[i].SubRulesSum;
+                Rules[i].Weight = Rules[Rules[i].Parent].Weight * Rules[i].Share / Rules[Rules[i].Parent].SubRulesSum;
             } else {
                 Rules[i].Weight = 0;
             }
@@ -225,6 +226,7 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
         }
         return result;
     };
+    makeRules(rule);
     Impl->Rules.swap(rules);
 
     Impl->AssignWeights();
@@ -236,24 +238,23 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
 
 double TComputeScheduler::GroupNow(TSchedulerEntity& self, TMonotonic now) {
     auto group = self.Group->Current();
-    return group.get()->Now + FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
+    if (group.get()->EntitiesWeight < MinEntitiesWeight) {
+        return group.get()->Now;
+    } else {
+        return group.get()->Now + FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
+    }
 }
 
 
 TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weight, TMonotonic now) {
     Y_ENSURE(Impl->PoolId.contains(groupName), "unknown scheduler group");
     auto* groupEntry = Impl->Records[Impl->PoolId.at(groupName)].get();
-    auto group = groupEntry->Current();
     auto result = std::make_unique<TSchedulerEntity>();
     result->Group = groupEntry;
     result->Weight = weight;
-    result->Vstart = group.get()->Now;
-    if (groupEntry->Next()->EntitiesWeight < MinEntitiesWeight) {
-        groupEntry->Next()->EntitiesWeight += weight;
-        AdvanceTime(now);
-    } else {
-        groupEntry->Next()->EntitiesWeight += weight;
-    }
+    result->Vstart = groupEntry->Current().get()->Now;
+    groupEntry->Next()->EntitiesWeight += weight;
+    AdvanceTime(now);
     return TSchedulerEntityHandle(result.release());
 }
 
@@ -271,9 +272,10 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
     }
 }
 
-void TComputeScheduler::Deregister(TSchedulerEntity& self) {
+void TComputeScheduler::Deregister(TSchedulerEntity& self, TMonotonic now) {
     auto* group = self.Group->Next();
     group->Weight -= self.Weight;
+    AdvanceTime(now);
 }
 
 void TComputeScheduler::TrackTime(TSchedulerEntity& self, TDuration time) {

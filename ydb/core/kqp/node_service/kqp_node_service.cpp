@@ -563,7 +563,7 @@ private:
     void HandleWork(TEvFinishKqpTask::TPtr& ev) {
         auto& msg = *ev->Get();
         if (msg.SchedulerEntity) {
-            Scheduler.Deregister(*msg.SchedulerEntity);
+            Scheduler.Deregister(*msg.SchedulerEntity, TlsActivationContext->Monotonic());
         }
         FinishKqpTask(msg.TxId, msg.TaskId, msg.Success, GetStateBucketByTx(Buckets, msg.TxId), GetKqpResourceManager());
     }
