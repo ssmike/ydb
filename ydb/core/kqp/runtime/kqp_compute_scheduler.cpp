@@ -254,12 +254,13 @@ TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weigh
     result->Weight = weight;
     result->Vstart = groupEntry->Current().get()->Now;
     groupEntry->Next()->EntitiesWeight += weight;
+
+    Impl->AssignWeights();
     AdvanceTime(now);
     return TSchedulerEntityHandle(result.release());
 }
 
 void TComputeScheduler::AdvanceTime(TMonotonic now) {
-    Impl->AssignWeights();
     for (auto& v : Impl->Records) {
         {
             auto group = v.get()->Current();
@@ -275,6 +276,8 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
 void TComputeScheduler::Deregister(TSchedulerEntity& self, TMonotonic now) {
     auto* group = self.Group->Next();
     group->Weight -= self.Weight;
+
+    Impl->AssignWeights();
     AdvanceTime(now);
 }
 
