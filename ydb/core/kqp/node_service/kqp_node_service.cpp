@@ -78,6 +78,8 @@ public:
         }
         if (config.HasComputePoolsConfiguration()) {
             SetPriorities(config.GetComputePoolsConfiguration());
+        } else {
+            SetPriorities(TComputeScheduler::TDistributionRule{.Share = 1, .Name = "olap"});
         }
     }
 
@@ -410,11 +412,16 @@ private:
                 Y_ENSURE(false, "unknown case");
             }
         };
-        auto converted = convert(conf);
+        SetPriorities(convert(conf));
+    }
 
-        auto threads = TlsActivationContext->ActorSystem()->GetPoolThreadsCount(SelfId().PoolID());
-        Y_ENSURE(threads.has_value());
-        Scheduler.SetPriorities(converted.empty() ? TComputeScheduler::TDistributionRule{.Share = 1, .Name = "olap"} : converted, threads.value(), TlsActivationContext->Monotonic());
+    void SetPriorities(TComputeScheduler::TDistributionRule rule) {
+        NActors::TExecutorPoolStats poolStats;
+        TVector<NActors::TExecutorThreadStats> threadsStats;
+        TlsActivationContext->ActorSystem()->GetPoolStats(SelfId().PoolID(), poolStats, threadsStats);
+        Y_ENSURE(poolStats.MaxThreadCount > 0);
+
+        Scheduler.SetPriorities(rule, poolStats.MaxThreadCount, TlsActivationContext->Monotonic());
     }
 
     void SetIteratorReadsRetrySettings(const NKikimrConfig::TTableServiceConfig::TIteratorReadsRetrySettings& settings) {
