@@ -208,6 +208,8 @@ std::unique_ptr<TEvKqpNode::TEvStartKqpTasksRequest> TKqpPlanner::SerializeReque
         request.SetSerializedGUCSettings(GUCSettings->SerializeToString());
     }
 
+    request.SetSchedulerGroup(SchedulerGroup);
+
     return result;
 }
 
