@@ -249,12 +249,12 @@ private:
                 .Now = schedulerNow,
                 .NodeService = SelfId(),
                 .Scheduler = &Scheduler,
-                .Group = msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::SCAN ? "olap" : "",
+                .Group = msg.GetSchedulerGroup(),
                 .Weight = 1,
                 .NoThrottle = false,
             };
 
-            if (msg.GetRuntimeSettings().GetExecType() == NYql::NDqProto::TComputeRuntimeSettings::DATA) {
+            if (msg.GetSchedulerGroup().empty()) {
                 schedulingOptions.NoThrottle = true;
                 schedulingOptions.Scheduler = nullptr;
             }
