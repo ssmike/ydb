@@ -103,7 +103,7 @@ private:
     friend class TSchedulerEntityHandle;
 
     struct TGroupRecord {
-        double Weight;
+        double Weight = 0;
         double Now = 0;
         TMonotonic LastNowRecalc;
         bool Disabled = false;
@@ -121,6 +121,10 @@ double TSchedulerEntityHandle::VRuntime() {
 }
 
 struct TComputeScheduler::TImpl {
+    TVector<::NMonitoring::TDynamicCounters::TCounterPtr> VtimeCounters;
+    TVector<::NMonitoring::TDynamicCounters::TCounterPtr> EntitiesWeightCounters;
+    TVector<::NMonitoring::TDynamicCounters::TCounterPtr> WeightCounters;
+
     THashMap<TString, size_t> PoolId;
     std::vector<std::unique_ptr<TMultithreadPublisher<TSchedulerEntity::TGroupRecord>>> Records;
 
@@ -136,6 +140,8 @@ struct TComputeScheduler::TImpl {
     std::vector<TRule> Rules;
 
     double SumCores;
+
+    TIntrusivePtr<TKqpCounters> Counters;
 
     void AssignWeights() {
         ssize_t rootRule = static_cast<ssize_t>(Rules.size()) - 1;
@@ -252,7 +258,7 @@ TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weigh
     auto result = std::make_unique<TSchedulerEntity>();
     result->Group = groupEntry;
     result->Weight = weight;
-    result->Vstart = groupEntry->Current().get()->Now;
+    result->Vstart = groupEntry->Next()->Now;
     groupEntry->Next()->EntitiesWeight += weight;
 
     Impl->AssignWeights();
@@ -261,13 +267,32 @@ TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weigh
 }
 
 void TComputeScheduler::AdvanceTime(TMonotonic now) {
-    for (auto& v : Impl->Records) {
+    if (Impl->Counters) {
+        if (Impl->VtimeCounters.size() < Impl->Records.size()) {
+            Impl->VtimeCounters.resize(Impl->Records.size());
+            Impl->EntitiesWeightCounters.resize(Impl->Records.size());
+            Impl->WeightCounters.resize(Impl->Records.size());
+            for (auto& [k, i] : Impl->PoolId) {
+                Impl->VtimeCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("VTime", true);
+                Impl->EntitiesWeightCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("Entities", false);
+                Impl->WeightCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("Weight", false);
+            }
+        }
+    }
+    for (size_t i = 0; i < Impl->Records.size(); ++i) {
+        auto& v = Impl->Records[i];
         {
             auto group = v.get()->Current();
             if (!group.get()->Disabled && group.get()->EntitiesWeight > MinEntitiesWeight) {
                 v.get()->Next()->Now += FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
-            v.get()->Next()->LastNowRecalc = now;
+            v->Next()->LastNowRecalc = now;
+            Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
+            if (Impl->VtimeCounters.size() > i && Impl->VtimeCounters[i]) {
+                Impl->VtimeCounters[i]->Set(v->Next()->Now);
+                Impl->EntitiesWeightCounters[i]->Set(v->Next()->EntitiesWeight);
+                Impl->WeightCounters[i]->Set(v->Next()->Weight);
+            }
         }
         v->Publish();
     }
@@ -297,6 +322,9 @@ TMaybe<TDuration> TComputeScheduler::CalcDelay(TSchedulerEntity& self, TMonotoni
     }
 }
 
+void TComputeScheduler::ReportCounters(TIntrusivePtr<TKqpCounters> counters) {
+    Impl->Counters = counters;
+}
 
 } // namespace NKqp
 } // namespace NKikimr

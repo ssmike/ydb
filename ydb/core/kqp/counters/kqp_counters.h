@@ -403,6 +403,10 @@ public:
     ::NMonitoring::TDynamicCounters::TCounterPtr DataShardIteratorMessages;
     ::NMonitoring::TDynamicCounters::TCounterPtr IteratorDeliveryProblems;
 
+    // Scheduler signals
+    ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerThrottled;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerCapacity;
+
     // Sequences counters
     ::NMonitoring::TDynamicCounters::TCounterPtr SequencerActorsCount;
     ::NMonitoring::TDynamicCounters::TCounterPtr SequencerErrors;

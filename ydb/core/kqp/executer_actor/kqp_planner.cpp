@@ -80,6 +80,7 @@ TKqpPlanner::TKqpPlanner(TKqpPlanner::TArgs&& args)
     , FederatedQuerySetup(args.FederatedQuerySetup)
     , OutputChunkMaxSize(args.OutputChunkMaxSize)
     , GUCSettings(std::move(args.GUCSettings))
+    , SchedulerGroup(std::move(args.SchedulerGroup))
 {
     if (!Database) {
         // a piece of magic for tests
