@@ -81,6 +81,7 @@ public:
         } else {
             SetPriorities(TComputeScheduler::TDistributionRule{.Share = 1, .Name = "olap"});
         }
+        Scheduler.ReportCounters(counters);
     }
 
     void Bootstrap() {
@@ -252,6 +253,7 @@ private:
                 .Group = msg.GetSchedulerGroup(),
                 .Weight = 1,
                 .NoThrottle = false,
+                .Counters = Counters
             };
 
             if (msg.GetSchedulerGroup().empty()) {
@@ -420,6 +422,7 @@ private:
         TVector<NActors::TExecutorThreadStats> threadsStats;
         TlsActivationContext->ActorSystem()->GetPoolStats(SelfId().PoolID(), poolStats, threadsStats);
         Y_ENSURE(poolStats.MaxThreadCount > 0);
+        Counters->SchedulerCapacity->Set(poolStats.MaxThreadCount);
 
         Scheduler.SetPriorities(rule, poolStats.MaxThreadCount, TlsActivationContext->Monotonic());
     }

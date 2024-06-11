@@ -2,6 +2,7 @@
 
 #include <util/datetime/base.h>
 
+#include <ydb/core/kqp/counters/kqp_counters.h>
 
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/yql/dq/actors/compute/dq_sync_compute_actor_base.h>
@@ -54,6 +55,8 @@ public:
     TComputeScheduler();
     ~TComputeScheduler();
 
+    void ReportCounters(TIntrusivePtr<TKqpCounters>);
+
     void SetPriorities(TDistributionRule rootRule, double cores, TMonotonic now);
 
     TSchedulerEntityHandle Enroll(TString group, double weight, TMonotonic now);
@@ -80,6 +83,7 @@ struct TComputeActorSchedulingOptions {
     TString Group = "";
     double Weight = 1;
     bool NoThrottle = false;
+    TIntrusivePtr<TKqpCounters> Counters = nullptr;
 };
 
 struct TEvFinishKqpTask : public TEventLocal<TEvFinishKqpTask, TKqpEvents::EKqpEvents::EvFinishKqpTasks> {
@@ -115,6 +119,9 @@ public:
         if (Scheduler) {
             SelfHandle = Scheduler->Enroll(options.Group, options.Weight, options.Now);
         }
+        if (options.Counters) {
+            ThrottledCounter = options.Counters->SchedulerThrottled;
+        }
     }
 
     static constexpr ui64 ResumeWakeupTag = 201;
@@ -139,15 +146,28 @@ public:
         }
     }
 
+private:
+    void ReportThrottledTime(TMonotonic now) {
+        if (ThrottledCounter && Throttled) {
+            ThrottledCounter->Add((now - *Throttled).MicroSeconds());
+            Throttled.Clear();
+        }
+    }
+
 protected:
     void DoExecuteImpl() override {
         if (!SelfHandle) {
             return TBase::DoExecuteImpl();
         }
+
         ExecuteStart = NActors::TlsActivationContext->Monotonic();
-        TMaybe<TDuration> delay = Scheduler->CalcDelay(*SelfHandle, *ExecuteStart);
         TMonotonic now = *ExecuteStart;
+        TMaybe<TDuration> delay = Scheduler->CalcDelay(*SelfHandle, *ExecuteStart);
+        bool executed = false;
         if (NoThrottle || !delay) {
+            ReportThrottledTime(now);
+            executed = true;
+
             TBase::DoExecuteImpl();
             if (Finished) {
                 return;
@@ -162,6 +182,10 @@ protected:
             }
             CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec ");
             this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
+        }
+
+        if (executed && delay) {
+            Throttled = now;
         }
         ExecuteStart.Clear();
     }
@@ -179,11 +203,14 @@ protected:
 
 private:
     TMaybe<TMonotonic> ExecuteStart;
+    TMaybe<TMonotonic> Throttled;
     TComputeScheduler* Scheduler;
     TSchedulerEntityHandle SelfHandle;
     NActors::TActorId NodeService;
     bool NoThrottle;
     bool Finished = false;
+
+    ::NMonitoring::TDynamicCounters::TCounterPtr ThrottledCounter;
 };
 
 } // namespace NKqp
