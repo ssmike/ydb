@@ -111,7 +111,7 @@ private:
         };
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpNode::TEvStartKqpTasksRequest, HandleWork);
-            hFunc(TEvFinishKqpTask, HandleWork); // used only for unit tests
+            hFunc(TEvKqpNode::TEvFinishKqpTask, HandleWork); // used only for unit tests
             hFunc(TEvKqpNode::TEvCancelKqpTasksRequest, HandleWork);
             hFunc(TEvents::TEvWakeup, HandleWork);
             // misc
@@ -120,6 +120,9 @@ private:
             hFunc(TEvents::TEvUndelivered, HandleWork);
             hFunc(TEvents::TEvPoison, HandleWork);
             hFunc(NMon::TEvHttpInfo, HandleWork);
+            // sheduling
+            hFunc(TEvSchedulerDeregister, HandleWork);
+            hFunc(TEvSchedulerRenice, HandleWork);
             default: {
                 Y_ABORT("Unexpected event 0x%x for TKqpResourceManagerService", ev->GetTypeRewrite());
             }
@@ -127,6 +130,25 @@ private:
     }
 
     static constexpr double SecToUsec = 1e6;
+
+    void HandleWork(TEvSchedulerDeregister::TPtr& ev) {
+        if (ev->Get()->SchedulerEntity) {
+            Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+        }
+    }
+
+    void HandleWork(TEvSchedulerRenice::TPtr& ev) {
+        auto now = TlsActivationContext->Monotonic();
+        if (ev->Get()->SchedulerEntity) {
+            Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
+        }
+        TSchedulerEntityHandle handle;
+        if (ev->Get()->DesiredWeight != 0) {
+            handle = Scheduler.Enroll(ev->Get()->DesiredGroup, ev->Get()->DesiredWeight, now);
+        }
+        auto reniceConfirm = MakeHolder<TEvSchedulerReniceConfirm>(std::move(handle));
+        this->Send(ev->Sender, reniceConfirm.Release());
+    }
 
     void HandleWork(TEvKqpNode::TEvStartKqpTasksRequest::TPtr& ev) {
         NWilson::TSpan sendTasksSpan(TWilsonKqp::KqpNodeSendTasks, NWilson::TTraceId(ev->TraceId), "KqpNode.SendTasks", NWilson::EFlags::AUTO_END);
@@ -258,7 +280,8 @@ private:
 
             if (msg.GetSchedulerGroup().empty()) {
                 schedulingOptions.NoThrottle = true;
-                schedulingOptions.Scheduler = nullptr;
+            } else {
+                schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
             }
 
             taskCtx.ComputeActorId = CaFactory()->CreateKqpComputeActor(
@@ -288,7 +311,7 @@ private:
     }
 
     // used only for unit tests
-    void HandleWork(TEvFinishKqpTask::TPtr& ev) {
+    void HandleWork(TEvKqpNode::TEvFinishKqpTask::TPtr& ev) {
         auto& msg = *ev->Get();
         auto& bucket = State_->GetStateBucketByTx(msg.TxId);
         auto tasksToAbort = bucket.GetTasksByTxId(msg.TxId);
@@ -307,9 +330,6 @@ private:
                 auto abortEv = std::make_unique<TEvKqp::TEvAbortExecution>(NYql::NDqProto::StatusIds::ABORTED, finalReason);
                 Send(computeActorId, abortEv.release());
             }
-        }
-        if (msg.SchedulerEntity) {
-            Scheduler.Deregister(*msg.SchedulerEntity, TlsActivationContext->Monotonic());
         }
     }
 

@@ -98,22 +98,59 @@ public:
     TSchedulerEntity() {}
     ~TSchedulerEntity() {}
 
-private:
-    friend class TComputeScheduler;
-    friend class TSchedulerEntityHandle;
-
     struct TGroupRecord {
         double Weight = 0;
         double Now = 0;
         TMonotonic LastNowRecalc;
         bool Disabled = false;
         double EntitiesWeight = 0;
+
+        double GroupNow(TMonotonic now) const {
+            if (EntitiesWeight < MinEntitiesWeight) {
+                return Now;
+            } else {
+                return Now + FromDuration(now - LastNowRecalc) * Weight / EntitiesWeight;
+            }
+        }
     };
 
     TMultithreadPublisher<TGroupRecord>* Group;
     double Weight;
     double Vruntime = 0;
     double Vstart;
+
+    void TrackTime(TDuration time) {
+        Vruntime += FromDuration(time) / Weight;
+    }
+
+    TMaybe<TDuration> CalcDelay(TMonotonic now) {
+        auto group = Group->Current();
+        Y_ENSURE(!group.get()->Disabled);
+        double lagTime = (Vruntime - (group.get()->Now - Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
+        double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
+        if (neededTime <= 0) {
+            return Nothing();
+        } else {
+            return ToDuration(neededTime);
+        }
+    }
+
+    TMaybe<TDuration> Lag(TMonotonic now) {
+        auto group = Group->Current();
+        Y_ENSURE(!group.get()->Disabled);
+        double lagTime = (FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight + (group.get()->Now - Vstart) - Vruntime) * Weight;
+        if (lagTime <= 0) {
+            return Nothing();
+        } else {
+            return ToDuration(lagTime);
+        }
+    }
+
+    double EstimateWeight(TMonotonic now, TDuration minTime) {
+        double vruntime = Max(Vruntime, FromDuration(minTime) / Weight);
+        double vtime = Group->Current().get()->GroupNow(now);
+        return Weight * (vruntime / vtime);
+    }
 };
 
 double TSchedulerEntityHandle::VRuntime() {
@@ -123,7 +160,7 @@ double TSchedulerEntityHandle::VRuntime() {
 struct TComputeScheduler::TImpl {
     TVector<::NMonitoring::TDynamicCounters::TCounterPtr> VtimeCounters;
     TVector<::NMonitoring::TDynamicCounters::TCounterPtr> EntitiesWeightCounters;
-    TVector<::NMonitoring::TDynamicCounters::TCounterPtr> WeightCounters;
+    TVector<::NMonitoring::TDynamicCounters::TCounterPtr> LimitCounters;
 
     THashMap<TString, size_t> PoolId;
     std::vector<std::unique_ptr<TMultithreadPublisher<TSchedulerEntity::TGroupRecord>>> Records;
@@ -242,16 +279,6 @@ void TComputeScheduler::SetPriorities(TDistributionRule rule, double cores, TMon
 }
 
 
-double TComputeScheduler::GroupNow(TSchedulerEntity& self, TMonotonic now) {
-    auto group = self.Group->Current();
-    if (group.get()->EntitiesWeight < MinEntitiesWeight) {
-        return group.get()->Now;
-    } else {
-        return group.get()->Now + FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
-    }
-}
-
-
 TSchedulerEntityHandle TComputeScheduler::Enroll(TString groupName, double weight, TMonotonic now) {
     Y_ENSURE(Impl->PoolId.contains(groupName), "unknown scheduler group");
     auto* groupEntry = Impl->Records[Impl->PoolId.at(groupName)].get();
@@ -271,11 +298,11 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
         if (Impl->VtimeCounters.size() < Impl->Records.size()) {
             Impl->VtimeCounters.resize(Impl->Records.size());
             Impl->EntitiesWeightCounters.resize(Impl->Records.size());
-            Impl->WeightCounters.resize(Impl->Records.size());
+            Impl->LimitCounters.resize(Impl->Records.size());
             for (auto& [k, i] : Impl->PoolId) {
                 Impl->VtimeCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("VTime", true);
                 Impl->EntitiesWeightCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("Entities", false);
-                Impl->WeightCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("Weight", false);
+                Impl->LimitCounters[i] = Impl->Counters->GetKqpCounters()->GetSubgroup("NodeScheduler/Group", k)->GetCounter("Limit", true);
             }
         }
     }
@@ -287,11 +314,11 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
                 v.get()->Next()->Now += FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
             v->Next()->LastNowRecalc = now;
-            Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
+            // Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
             if (Impl->VtimeCounters.size() > i && Impl->VtimeCounters[i]) {
                 Impl->VtimeCounters[i]->Set(v->Next()->Now);
                 Impl->EntitiesWeightCounters[i]->Set(v->Next()->EntitiesWeight);
-                Impl->WeightCounters[i]->Set(v->Next()->Weight);
+                Impl->LimitCounters[i]->Add(FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight);
             }
         }
         v->Publish();
@@ -300,26 +327,35 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
 
 void TComputeScheduler::Deregister(TSchedulerEntity& self, TMonotonic now) {
     auto* group = self.Group->Next();
-    group->Weight -= self.Weight;
+    group->EntitiesWeight -= self.Weight;
+
+    double delta = self.Group->Current().get()->GroupNow(now) - self.Vruntime;
+    if (group->EntitiesWeight > MinEntitiesWeight) {
+        group->Now += delta * self.Weight / group->EntitiesWeight;
+    }
 
     Impl->AssignWeights();
     AdvanceTime(now);
 }
 
-void TComputeScheduler::TrackTime(TSchedulerEntity& self, TDuration time) {
-    self.Vruntime += FromDuration(time) / self.Weight;
+void TSchedulerEntityHandle::TrackTime(TDuration time) {
+    Ptr->TrackTime(time);
 }
 
-TMaybe<TDuration> TComputeScheduler::CalcDelay(TSchedulerEntity& self, TMonotonic now) {
-    auto group = self.Group->Current();
-    Y_ENSURE(!group.get()->Disabled);
-    double lagTime = (self.Vruntime - (group.get()->Now - self.Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
-    double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
-    if (neededTime <= 0) {
-        return Nothing();
-    } else {
-        return ToDuration(neededTime);
-    }
+TMaybe<TDuration> TSchedulerEntityHandle::CalcDelay(TMonotonic now) {
+    return Ptr->CalcDelay(now);
+}
+
+TMaybe<TDuration> TSchedulerEntityHandle::Lag(TMonotonic now) {
+    return Ptr->Lag(now);
+}
+
+void TSchedulerEntityHandle::Clear() {
+    Ptr.reset();
+}
+
+double TSchedulerEntityHandle::EstimateWeight(TMonotonic now, TDuration minTime) {
+    return Ptr->EstimateWeight(now, minTime);
 }
 
 void TComputeScheduler::ReportCounters(TIntrusivePtr<TKqpCounters> counters) {

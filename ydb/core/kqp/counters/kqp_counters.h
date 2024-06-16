@@ -406,6 +406,10 @@ public:
     // Scheduler signals
     ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerThrottled;
     ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerCapacity;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerRenices;
+    NMonitoring::THistogramPtr ScheduledActorsRuns;
+    NMonitoring::THistogramPtr SchedulerDelays;
+    ::NMonitoring::TDynamicCounters::TCounterPtr ScheduledActorsActivationsCount;
 
     // Sequences counters
     ::NMonitoring::TDynamicCounters::TCounterPtr SequencerActorsCount;

@@ -27,7 +27,7 @@ TKqpScanComputeActor::TKqpScanComputeActor(TComputeActorSchedulingOptions cpuOpt
     IDqAsyncIoFactory::TPtr asyncIoFactory,
     const TComputeRuntimeSettings& settings, const TComputeMemoryLimits& memoryLimits, NWilson::TTraceId traceId,
     TIntrusivePtr<NActors::TProtoArenaHolder> arena)
-    : TBase(cpuOptions, executerId, txId, task, std::move(asyncIoFactory), settings,
+    : TBase(std::move(cpuOptions), executerId, txId, task, std::move(asyncIoFactory), settings,
         memoryLimits, /* ownMemoryQuota = */ true, /* passExceptions = */ true, /*taskCounters = */ nullptr, std::move(traceId), std::move(arena))
     , ComputeCtx(settings.StatsMode)
 {

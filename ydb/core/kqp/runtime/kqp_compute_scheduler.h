@@ -36,6 +36,15 @@ public:
 
     double VRuntime();
 
+    void TrackTime(TDuration time);
+    TMaybe<TDuration> CalcDelay(TMonotonic now);
+
+    TMaybe<TDuration> Lag(TMonotonic now);
+
+    double EstimateWeight(TMonotonic now, TDuration minTime);
+
+    void Clear();
+
     ~TSchedulerEntityHandle();
 };
 
@@ -65,12 +74,6 @@ public:
 
     void Deregister(TSchedulerEntity& self, TMonotonic now);
 
-    void TrackTime(TSchedulerEntity& self, TDuration time);
-
-    double GroupNow(TSchedulerEntity& self, TMonotonic now);
-
-    TMaybe<TDuration> CalcDelay(TSchedulerEntity& self, TMonotonic now);
-
 private:
     struct TImpl;
     std::unique_ptr<TImpl> Impl;
@@ -79,26 +82,52 @@ private:
 struct TComputeActorSchedulingOptions {
     TMonotonic Now;
     NActors::TActorId NodeService;
-    TComputeScheduler* Scheduler = nullptr;
+    TSchedulerEntityHandle Handle;
+    TComputeScheduler* Scheduler;
     TString Group = "";
     double Weight = 1;
-    bool NoThrottle = false;
+    bool NoThrottle = true;
     TIntrusivePtr<TKqpCounters> Counters = nullptr;
 };
 
-struct TEvFinishKqpTask : public TEventLocal<TEvFinishKqpTask, TKqpEvents::EKqpEvents::EvFinishKqpTasks> {
-    const ui64 TxId;
-    const ui64 TaskId;
-    const bool Success;
-    const NYql::TIssues Issues;
+struct TKqpComputeSchedulerEvents {
+    enum EKqpComputeSchedulerEvents {
+        EvDeregister = EventSpaceBegin(TKikimrEvents::ES_KQP) + 400,
+        EvRenice,
+        EvReniceConfirm,
+        EvRedistribute
+    };
+};
 
+struct TEvSchedulerDeregister : public TEventLocal<TEvSchedulerDeregister, TKqpComputeSchedulerEvents::EvDeregister> {
     TSchedulerEntityHandle SchedulerEntity;
 
-    TEvFinishKqpTask(ui64 txId, ui64 taskId, bool success, const NYql::TIssues& issues = {})
-        : TxId(txId)
-        , TaskId(taskId)
-        , Success(success)
-        , Issues(issues) {}
+    TEvSchedulerDeregister(TSchedulerEntityHandle entity)
+        : SchedulerEntity(std::move(entity))
+    {
+    }
+};
+
+struct TEvSchedulerRenice : public TEventLocal<TEvSchedulerRenice, TKqpComputeSchedulerEvents::EvRenice> {
+    TSchedulerEntityHandle SchedulerEntity;
+    double DesiredWeight;
+    TString DesiredGroup;
+
+    TEvSchedulerRenice(TSchedulerEntityHandle handle, double weight, TString desiredGroup)
+        : SchedulerEntity(std::move(handle))
+        , DesiredWeight(weight)
+        , DesiredGroup(desiredGroup)
+    {
+    }
+};
+
+struct TEvSchedulerReniceConfirm : public TEventLocal<TEvSchedulerRenice, TKqpComputeSchedulerEvents::EvReniceConfirm> {
+    TSchedulerEntityHandle SchedulerEntity;
+
+    TEvSchedulerReniceConfirm(TSchedulerEntityHandle entity)
+        : SchedulerEntity(std::move(entity))
+    {
+    }
 };
 
 
@@ -107,63 +136,117 @@ class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<T
 private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
 
-    static constexpr TDuration MaxDelay = TDuration::MilliSeconds(60);
+    static constexpr TDuration MaxDelay = TDuration::MilliSeconds(100);
+    static constexpr TDuration ReniceTimeout = TDuration::Seconds(1);
+    static constexpr TDuration MaxLag = TDuration::MilliSeconds(10);
+    static constexpr TDuration MinDelay = TDuration::MilliSeconds(10);
 
 public:
     template<typename... TArgs>
     TSchedulableComputeActorBase(TComputeActorSchedulingOptions options, TArgs&&... args)
         : TBase(std::forward<TArgs>(args)...)
-        , Scheduler(options.Scheduler)
+        , SelfHandle(std::move(options.Handle))
+        , NodeService(options.NodeService)
         , NoThrottle(options.NoThrottle)
+        , Counters(options.Counters)
+        , Group(options.Group)
+        , Weight(options.Weight)
     {
-        if (Scheduler) {
-            SelfHandle = Scheduler->Enroll(options.Group, options.Weight, options.Now);
-        }
-        if (options.Counters) {
-            ThrottledCounter = options.Counters->SchedulerThrottled;
+        if (!NoThrottle) {
+            //SelfHandle.TrackTime(Lag);
+            if (Counters) {
+                GroupUsage = Counters->GetKqpCounters()
+                    ->GetSubgroup("NodeScheduler/Group", options.Group)
+                    ->GetCounter("Usage", true);
+            }
         }
     }
 
     static constexpr ui64 ResumeWakeupTag = 201;
+    static constexpr ui64 ReniceWakeupTag = 202;
 
     void HandleWakeup(NActors::TEvents::TEvWakeup::TPtr& ev) {
         auto tag = ev->Get()->Tag;
         CA_LOG_D("wakeup with tag " << tag);
         if (tag == ResumeWakeupTag) {
-            //TBase::Start();
             TBase::DoExecute();
+        } else if (tag == ReniceWakeupTag) {
+            Y_ABORT_UNLESS(SelfHandle);
+            ReniceWakeupScheduled = false;
+            auto now = TlsActivationContext->Monotonic();
+            if (auto lag = SelfHandle.Lag(now)) {
+                if (*lag >= MaxLag) {
+                    return DoRenice(Min(Weight, SelfHandle.EstimateWeight(now, TDuration::MilliSeconds(1)) * 1.05));
+                }
+            }
+            ScheduleReniceWakeup();
         } else {
             TBase::HandleExecuteBase(ev);
         }
     }
 
+    void ScheduleReniceWakeup() {
+        if (ReniceWakeupScheduled) {
+            return;
+        }
+        this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
+        ReniceWakeupScheduled = true;
+    }
+
+    void DoRenice(double newWeight) {
+        if (RunningRenice) {
+            return;
+        }
+        RunningRenice = true;
+        Counters->SchedulerRenices->Inc();
+        auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), newWeight, Group);
+        this->Send(NodeService, renice.Release());
+    }
+
+    void HandleWork(TEvSchedulerReniceConfirm::TPtr& ev) {
+        RunningRenice = false;
+        SelfHandle = std::move(ev->Get()->SchedulerEntity);
+        TBase::DoExecute();
+    }
 
     STFUNC(BaseStateFuncBody) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
-            default:
-                TBase::BaseStateFuncBody(ev);
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
+                hFunc(TEvSchedulerReniceConfirm, HandleWork);
+                default:
+                    TBase::BaseStateFuncBody(ev);
+            }
+        } catch (...) {
+            CA_LOG_E("exception in CA handler " << CurrentExceptionMessage());
+            PassAway();
         }
     }
 
 private:
     void ReportThrottledTime(TMonotonic now) {
-        if (ThrottledCounter && Throttled) {
-            ThrottledCounter->Add((now - *Throttled).MicroSeconds());
+        if (Counters && Throttled) {
+            Counters->SchedulerThrottled->Add((now - *Throttled).MicroSeconds());
             Throttled.Clear();
         }
     }
 
 protected:
     void DoExecuteImpl() override {
-        if (!SelfHandle) {
-            return TBase::DoExecuteImpl();
+        if (!SelfHandle) {// && Lag == TDuration::Zero()) {
+            if (NoThrottle) {
+                return TBase::DoExecuteImpl();
+            } else {
+                return DoRenice(Weight);
+            }
         }
 
         ExecuteStart = NActors::TlsActivationContext->Monotonic();
         TMonotonic now = *ExecuteStart;
-        TMaybe<TDuration> delay = Scheduler->CalcDelay(*SelfHandle, *ExecuteStart);
+        TMaybe<TDuration> delay = CalcDelay(*ExecuteStart);
         bool executed = false;
+        //delay.Clear();
+        Counters->ScheduledActorsActivationsCount->Inc();
         if (NoThrottle || !delay) {
             ReportThrottledTime(now);
             executed = true;
@@ -173,14 +256,19 @@ protected:
                 return;
             }
             now = NActors::TlsActivationContext->Monotonic();
-            Scheduler->TrackTime(*SelfHandle, now - *ExecuteStart);
-            delay = Scheduler->CalcDelay(*SelfHandle, now);
+            SelfHandle.TrackTime(now - *ExecuteStart);
+            Counters->ScheduledActorsRuns->Collect((now - *ExecuteStart).MicroSeconds());
+            //delay = SelfHandle.CalcDelay(now);
+            if (GroupUsage) {
+                GroupUsage->Add((now - *ExecuteStart).MicroSeconds());
+            }
         }
         if (delay) {
             if (*delay > MaxDelay) {
                 delay = MaxDelay;
             }
             CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec ");
+            Counters->SchedulerDelays->Collect(delay->MicroSeconds());
             this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
 
@@ -190,27 +278,45 @@ protected:
         ExecuteStart.Clear();
     }
 
+    TMaybe<TDuration> CalcDelay(NMonotonic::TMonotonic now) {
+        auto result = SelfHandle.CalcDelay(now);
+        if (NoThrottle || (result && *result < MinDelay)) {
+            return {};
+        } else {
+            return result;
+        }
+    }
+
     void PassAway() override {
         Finished = true;
         if (ExecuteStart && SelfHandle) {
-            Scheduler->TrackTime(*SelfHandle, NActors::TlsActivationContext->Monotonic() - *ExecuteStart);
+            SelfHandle.TrackTime(NActors::TlsActivationContext->Monotonic() - *ExecuteStart);
         }
-        auto finishEv = MakeHolder<TEvFinishKqpTask>(std::get<ui64>(this->GetTxId()), this->GetTask().GetId(), true);
-        finishEv->SchedulerEntity = std::move(SelfHandle);
-        this->Send(NodeService, finishEv.Release());
+        if (SelfHandle) {
+            auto finishEv = MakeHolder<TEvSchedulerDeregister>(std::move(SelfHandle));
+            this->Send(NodeService, finishEv.Release());
+        }
         TBase::PassAway();
     }
 
 private:
     TMaybe<TMonotonic> ExecuteStart;
     TMaybe<TMonotonic> Throttled;
-    TComputeScheduler* Scheduler;
     TSchedulerEntityHandle SelfHandle;
     NActors::TActorId NodeService;
     bool NoThrottle;
     bool Finished = false;
 
-    ::NMonitoring::TDynamicCounters::TCounterPtr ThrottledCounter;
+    TIntrusivePtr<TKqpCounters> Counters;
+    ::NMonitoring::TDynamicCounters::TCounterPtr GroupUsage;
+
+    TString Group;
+    double Weight;
+
+    bool ReniceWakeupScheduled = false;
+    bool RunningRenice = false;
+
+    //double Wdelta = 0;
 };
 
 } // namespace NKqp
