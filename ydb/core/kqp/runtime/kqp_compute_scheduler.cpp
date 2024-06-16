@@ -98,10 +98,6 @@ public:
     TSchedulerEntity() {}
     ~TSchedulerEntity() {}
 
-private:
-    friend class TComputeScheduler;
-    friend class TSchedulerEntityHandle;
-
     struct TGroupRecord {
         double Weight = 0;
         double Now = 0;
@@ -114,6 +110,25 @@ private:
     double Weight;
     double Vruntime = 0;
     double Vstart;
+
+    void TrackTime(TDuration time) {
+        Vruntime += FromDuration(time) / Weight;
+    }
+
+    TMaybe<TDuration> CalcDelay(TMonotonic now) {
+        auto group = Group->Current();
+        Y_ENSURE(!group.get()->Disabled);
+        double lagTime = (Vruntime - (group.get()->Now - Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
+        double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
+        if (neededTime <= 0) {
+            return Nothing();
+        } else {
+            return ToDuration(neededTime);
+        }
+    }
+
+    TMaybe<TDuration> Lag() {
+    }
 };
 
 double TSchedulerEntityHandle::VRuntime() {
@@ -306,20 +321,16 @@ void TComputeScheduler::Deregister(TSchedulerEntity& self, TMonotonic now) {
     AdvanceTime(now);
 }
 
-void TComputeScheduler::TrackTime(TSchedulerEntity& self, TDuration time) {
-    self.Vruntime += FromDuration(time) / self.Weight;
+void TSchedulerEntityHandle::TrackTime(TDuration time) {
+    Ptr->TrackTime(time);
 }
 
-TMaybe<TDuration> TComputeScheduler::CalcDelay(TSchedulerEntity& self, TMonotonic now) {
-    auto group = self.Group->Current();
-    Y_ENSURE(!group.get()->Disabled);
-    double lagTime = (self.Vruntime - (group.get()->Now - self.Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
-    double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
-    if (neededTime <= 0) {
-        return Nothing();
-    } else {
-        return ToDuration(neededTime);
-    }
+TMaybe<TDuration> TSchedulerEntityHandle::CalcDelay(TMonotonic now) {
+    return Ptr->CalcDelay(now);
+}
+
+TMaybe<TDuration> TSchedulerEntityHandle::Lag() {
+    return Ptr->Lag();
 }
 
 void TComputeScheduler::ReportCounters(TIntrusivePtr<TKqpCounters> counters) {

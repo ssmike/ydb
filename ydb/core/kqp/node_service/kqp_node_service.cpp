@@ -190,7 +190,7 @@ private:
         };
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpNode::TEvStartKqpTasksRequest, HandleWork);
-            hFunc(TEvFinishKqpTask, HandleWork); // used only for unit tests
+            hFunc(TEvKqpNode::TEvFinishKqpTask, HandleWork); // used only for unit tests
             hFunc(TEvKqpNode::TEvCancelKqpTasksRequest, HandleWork);
             hFunc(TEvents::TEvWakeup, HandleWork);
             // misc
@@ -199,6 +199,8 @@ private:
             hFunc(TEvents::TEvUndelivered, HandleWork);
             hFunc(TEvents::TEvPoison, HandleWork);
             hFunc(NMon::TEvHttpInfo, HandleWork);
+            // sheduling
+            hFunc(TEvSchedulerDeregister, HandleWork);
             default: {
                 Y_ABORT("Unexpected event 0x%x for TKqpResourceManagerService", ev->GetTypeRewrite());
             }
@@ -282,8 +284,11 @@ private:
             return it->second.MergeMetaReads(dqTask, meta, forceOneToMany);
         }
     };
+static constexpr double SecToUsec = 1e6;
 
-    static constexpr double SecToUsec = 1e6;
+    void HandleWork(TEvSchedulerDeregister::TPtr& ev) {
+        Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+    }
 
     void HandleWork(TEvKqpNode::TEvStartKqpTasksRequest::TPtr& ev) {
         NWilson::TSpan sendTasksSpan(TWilsonKqp::KqpNodeSendTasks, NWilson::TTraceId(ev->TraceId), "KqpNode.SendTasks", NWilson::EFlags::AUTO_END);
@@ -564,11 +569,8 @@ private:
     }
 
     // used only for unit tests
-    void HandleWork(TEvFinishKqpTask::TPtr& ev) {
+    void HandleWork(TEvKqpNode::TEvFinishKqpTask::TPtr& ev) {
         auto& msg = *ev->Get();
-        if (msg.SchedulerEntity) {
-            Scheduler.Deregister(*msg.SchedulerEntity, TlsActivationContext->Monotonic());
-        }
         FinishKqpTask(msg.TxId, msg.TaskId, msg.Success, GetStateBucketByTx(Buckets, msg.TxId), GetKqpResourceManager());
     }
 
