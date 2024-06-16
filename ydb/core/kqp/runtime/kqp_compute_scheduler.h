@@ -39,7 +39,7 @@ public:
     void TrackTime(TDuration time);
     TMaybe<TDuration> CalcDelay(TMonotonic now);
 
-    TMaybe<TDuration> Lag();
+    TMaybe<TDuration> Lag(TMonotonic now);
 
     ~TSchedulerEntityHandle();
 };
@@ -185,11 +185,16 @@ public:
     }
 
     STFUNC(BaseStateFuncBody) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
-            hFunc(TEvSchedulerReniceConfirm, HandleWork);
-            default:
-                TBase::BaseStateFuncBody(ev);
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(NActors::TEvents::TEvWakeup, TSchedulableComputeActorBase<TDerived>::HandleWakeup);
+                hFunc(TEvSchedulerReniceConfirm, HandleWork);
+                default:
+                    TBase::BaseStateFuncBody(ev);
+            }
+        } catch (...) {
+            CA_LOG_E("exception in CA handler " << CurrentExceptionMessage());
+            PassAway();
         }
     }
 

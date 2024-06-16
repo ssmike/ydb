@@ -127,7 +127,15 @@ public:
         }
     }
 
-    TMaybe<TDuration> Lag() {
+    TMaybe<TDuration> Lag(TMonotonic now) {
+        auto group = Group->Current();
+        Y_ENSURE(!group.get()->Disabled);
+        double lagTime = (FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight + (group.get()->Now - Vstart) - Vruntime) * Weight;
+        if (lagTime <= 0) {
+            return Nothing();
+        } else {
+            return ToDuration(lagTime);
+        }
     }
 };
 
@@ -329,8 +337,8 @@ TMaybe<TDuration> TSchedulerEntityHandle::CalcDelay(TMonotonic now) {
     return Ptr->CalcDelay(now);
 }
 
-TMaybe<TDuration> TSchedulerEntityHandle::Lag() {
-    return Ptr->Lag();
+TMaybe<TDuration> TSchedulerEntityHandle::Lag(TMonotonic now) {
+    return Ptr->Lag(now);
 }
 
 void TComputeScheduler::ReportCounters(TIntrusivePtr<TKqpCounters> counters) {
