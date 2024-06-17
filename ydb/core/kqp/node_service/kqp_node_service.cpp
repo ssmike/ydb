@@ -293,8 +293,13 @@ static constexpr double SecToUsec = 1e6;
 
     void HandleWork(TEvSchedulerRenice::TPtr& ev) {
         auto now = TlsActivationContext->Monotonic();
-        Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
-        auto handle = Scheduler.Enroll(ev->Get()->DesiredGroup, ev->Get()->DesiredWeight, now);
+        if (ev->Get()->SchedulerEntity) {
+            Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
+        }
+        TSchedulerEntityHandle handle;
+        if (ev->Get()->DesiredWeight != 0) {
+            handle = Scheduler.Enroll(ev->Get()->DesiredGroup, ev->Get()->DesiredWeight, now);
+        }
         auto reniceConfirm = MakeHolder<TEvSchedulerReniceConfirm>(std::move(handle));
         this->Send(ev->Sender, reniceConfirm.Release());
     }
@@ -518,7 +523,6 @@ static constexpr double SecToUsec = 1e6;
             TComputeActorSchedulingOptions schedulingOptions {
                 .Now = now,
                 .NodeService = SelfId(),
-                .Scheduler = &Scheduler,
                 .Group = msg.GetSchedulerGroup(),
                 .Weight = 1,
                 .NoThrottle = false,
@@ -527,7 +531,8 @@ static constexpr double SecToUsec = 1e6;
 
             if (msg.GetSchedulerGroup().empty()) {
                 schedulingOptions.NoThrottle = true;
-                schedulingOptions.Scheduler = nullptr;
+            } else {
+                //schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
             }
 
             IActor* computeActor;
@@ -536,7 +541,7 @@ static constexpr double SecToUsec = 1e6;
                 computeActor = CreateKqpScanComputeActor(request.Executer, txId, &dqTask,
                     AsyncIoFactory, runtimeSettings, memoryLimits,
                     NWilson::TTraceId(ev->TraceId), ev->Get()->Arena,
-                    schedulingOptions);
+                    std::move(schedulingOptions));
                 taskCtx.ComputeActorId = Register(computeActor);
                 info.MutableActorIds().emplace_back(taskCtx.ComputeActorId);
             } else {
@@ -547,7 +552,7 @@ static constexpr double SecToUsec = 1e6;
                 if (Y_LIKELY(!CaFactory)) {
                     computeActor = CreateKqpComputeActor(request.Executer, txId, &dqTask, AsyncIoFactory,
                         runtimeSettings, memoryLimits, NWilson::TTraceId(ev->TraceId), ev->Get()->Arena, FederatedQuerySetup, GUCSettings,
-                        schedulingOptions);
+                        std::move(schedulingOptions));
                     taskCtx.ComputeActorId = Register(computeActor);
                 } else {
                     computeActor = CaFactory->CreateKqpComputeActor(request.Executer, txId, &dqTask,

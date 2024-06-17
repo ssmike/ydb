@@ -80,10 +80,10 @@ private:
 struct TComputeActorSchedulingOptions {
     TMonotonic Now;
     NActors::TActorId NodeService;
-    TComputeScheduler* Scheduler = nullptr;
+    TSchedulerEntityHandle Handle;
     TString Group = "";
     double Weight = 1;
-    bool NoThrottle = false;
+    bool NoThrottle = true;
     TIntrusivePtr<TKqpCounters> Counters = nullptr;
 };
 
@@ -134,20 +134,22 @@ private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
 
     static constexpr TDuration MaxDelay = TDuration::MilliSeconds(60);
-    static constexpr TDuration ReniceTimeout = TDuration::MilliSeconds(120);
+    static constexpr TDuration ReniceTimeout = TDuration::MilliSeconds(90);
+    static constexpr TDuration WarmupTime = TDuration::MilliSeconds(10);
 
 public:
     template<typename... TArgs>
     TSchedulableComputeActorBase(TComputeActorSchedulingOptions options, TArgs&&... args)
         : TBase(std::forward<TArgs>(args)...)
+        , SelfHandle(std::move(options.Handle))
         , NoThrottle(options.NoThrottle)
         , Counters(options.Counters)
         , Group(options.Group)
         , Weight(options.Weight)
+        , Lag(WarmupTime)
     {
         if (!NoThrottle) {
-            Y_ENSURE(options.Scheduler);
-            SelfHandle = options.Scheduler->Enroll(options.Group, options.Weight, options.Now);
+            //SelfHandle.TrackTime(Lag);
             if (Counters) {
                 GroupUsage = Counters->GetKqpCounters()
                     ->GetSubgroup("NodeScheduler/Group", options.Group)
@@ -165,19 +167,24 @@ public:
         if (tag == ResumeWakeupTag) {
             TBase::DoExecute();
         } else if (tag == ReniceWakeupTag) {
-            auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), Weight, Group);
-            this->Send(NodeService, renice.Release());
+            Y_ABORT_UNLESS(SelfHandle);
+            if (auto lag = SelfHandle.Lag(TlsActivationContext->Monotonic())) {
+                if (*lag >= WarmupTime) {
+                    SelfHandle.TrackTime(WarmupTime);
+                    Lag = *lag;
+                    return DoRenice(0);
+                }
+            }
+            this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
         } else {
             TBase::HandleExecuteBase(ev);
         }
     }
 
-    //void Bootstrap() override {
-    //    //if (!NoThrottle) {
-    //    //    this->Schedule(ReniceTimeout, new NActors::TEvents::TEvWakeup(ReniceWakeupTag));
-    //    //}
-    //    TBase::Bootstrap();
-    //}
+    void DoRenice(double newWeight) {
+        auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), newWeight, Group);
+        this->Send(NodeService, renice.Release());
+    }
 
     void HandleWork(TEvSchedulerReniceConfirm::TPtr& ev) {
         SelfHandle = std::move(ev->Get()->SchedulerEntity);
@@ -208,7 +215,7 @@ private:
 
 protected:
     void DoExecuteImpl() override {
-        if (!SelfHandle) {
+        if (!SelfHandle && Lag == TDuration::Zero()) {
             if (NoThrottle) {
                 return TBase::DoExecuteImpl();
             } else {
@@ -218,7 +225,10 @@ protected:
 
         ExecuteStart = NActors::TlsActivationContext->Monotonic();
         TMonotonic now = *ExecuteStart;
-        TMaybe<TDuration> delay = SelfHandle.CalcDelay(*ExecuteStart);
+        TMaybe<TDuration> delay;
+        if (SelfHandle) {
+            delay = SelfHandle.CalcDelay(*ExecuteStart);
+        }
         bool executed = false;
         if (NoThrottle || !delay) {
             ReportThrottledTime(now);
@@ -229,11 +239,17 @@ protected:
                 return;
             }
             now = NActors::TlsActivationContext->Monotonic();
-            SelfHandle.TrackTime(now - *ExecuteStart);
+            if (SelfHandle) {
+                SelfHandle.TrackTime(now - *ExecuteStart);
+                delay = SelfHandle.CalcDelay(now);
+            }
+            Lag -= (now - *ExecuteStart);
             if (GroupUsage) {
                 GroupUsage->Add((now - *ExecuteStart).MicroSeconds());
             }
-            delay = SelfHandle.CalcDelay(now);
+        }
+        if (!NoThrottle && !SelfHandle && Lag == TDuration::Zero()) {
+            DoRenice(Weight);
         }
         if (delay) {
             if (*delay > MaxDelay) {
@@ -272,6 +288,8 @@ private:
 
     TString Group;
     double Weight;
+
+    TDuration Lag = TDuration::Zero();
 };
 
 } // namespace NKqp
