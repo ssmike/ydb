@@ -310,7 +310,7 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
                 v.get()->Next()->Now += FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
             v->Next()->LastNowRecalc = now;
-            //Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
+            // Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
             if (Impl->VtimeCounters.size() > i && Impl->VtimeCounters[i]) {
                 Impl->VtimeCounters[i]->Set(v->Next()->Now);
                 Impl->EntitiesWeightCounters[i]->Set(v->Next()->EntitiesWeight);

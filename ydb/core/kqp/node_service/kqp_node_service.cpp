@@ -288,7 +288,9 @@ private:
 static constexpr double SecToUsec = 1e6;
 
     void HandleWork(TEvSchedulerDeregister::TPtr& ev) {
-        Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+        if (ev->Get()->SchedulerEntity) {
+            Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+        }
     }
 
     void HandleWork(TEvSchedulerRenice::TPtr& ev) {

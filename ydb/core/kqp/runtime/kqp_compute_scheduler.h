@@ -142,6 +142,7 @@ public:
     TSchedulableComputeActorBase(TComputeActorSchedulingOptions options, TArgs&&... args)
         : TBase(std::forward<TArgs>(args)...)
         , SelfHandle(std::move(options.Handle))
+        , NodeService(options.NodeService)
         , NoThrottle(options.NoThrottle)
         , Counters(options.Counters)
         , Group(options.Group)
@@ -182,6 +183,7 @@ public:
     }
 
     void DoRenice(double newWeight) {
+        Counters->SchedulerRenices->Inc();
         auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), newWeight, Group);
         this->Send(NodeService, renice.Release());
     }
@@ -270,8 +272,10 @@ protected:
         if (ExecuteStart && SelfHandle) {
             SelfHandle.TrackTime(NActors::TlsActivationContext->Monotonic() - *ExecuteStart);
         }
-        auto finishEv = MakeHolder<TEvSchedulerDeregister>(std::move(SelfHandle));
-        this->Send(NodeService, finishEv.Release());
+        if (SelfHandle) {
+            auto finishEv = MakeHolder<TEvSchedulerDeregister>(std::move(SelfHandle));
+            this->Send(NodeService, finishEv.Release());
+        }
         TBase::PassAway();
     }
 
