@@ -32,6 +32,7 @@ struct TKqpNodeEvents {
     enum EKqpNodeEvents {
         EvStartKqpTasksRequest = EventSpaceBegin(TKikimrEvents::ES_KQP) + 320,
         EvStartKqpTasksResponse,
+        EvFinishKqpTasks,
         EvCancelKqpTasksRequest,
         EvCancelKqpTasksResponse,
     };
@@ -51,7 +52,7 @@ struct TEvKqpNode {
     struct TEvStartKqpTasksResponse : public TEventPB<TEvStartKqpTasksResponse,
         NKikimrKqp::TEvStartKqpTasksResponse, TKqpNodeEvents::EvStartKqpTasksResponse> {};
 
-    struct TEvFinishKqpTask : public TEventLocal<TEvFinishKqpTask, TKqpEvents::EKqpEvents::EvFinishKqpTasks> {
+    struct TEvFinishKqpTask : public TEventLocal<TEvFinishKqpTask, TKqpNodeEvents::EvFinishKqpTasks> {
         const ui64 TxId;
         const ui64 TaskId;
         const bool Success;
