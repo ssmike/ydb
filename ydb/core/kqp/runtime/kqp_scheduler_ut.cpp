@@ -44,11 +44,11 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         while (now < deadline) {
             size_t toRun = executionUnits;
             for (size_t i = 0; i < processes.size(); ++i) {
-                groupnow[i] = scheduler.GroupNow(*handles[i], now);
-                Cerr << " " << handles[i].VRuntime() << "<" << scheduler.GroupNow(*handles[i], now) << " + " << (processes[i].Cuanta.MicroSeconds() / processes[i].Weight);
-                UNIT_ASSERT(handles[i].VRuntime() <= scheduler.GroupNow(*handles[i], now)   + (processes[i].Cuanta.MicroSeconds() / processes[i].Weight));
+                groupnow[i] = handles[i].GroupNow(now);
+                //Cerr << " " << handles[i].VRuntime() << "<" << scheduler.GroupNow(*handles[i], now) << " + " << (processes[i].Cuanta.MicroSeconds() / processes[i].Weight);
+                UNIT_ASSERT_LE(handles[i].VRuntime(), handles[i].GroupNow(now) + (processes[i].Cuanta.MicroSeconds() / processes[i].Weight) + 1e-5);
             }
-            Cerr << Endl;
+            //Cerr << Endl;
 
             for (size_t i = 0; i < processes.size(); ++i) {
                 if (events[i]) {
@@ -69,7 +69,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
                         if (events[i]->Type == TEvent::EEventType::Sleep) {
                             toRun -= 1;
                         } else {
-                            //UNIT_ASSERT(scheduler.CalcDelay(*handles[i], now - TDuration::MicroSeconds(1)).GetOrElse(TDuration::Zero()) > TDuration::Zero());
+                            UNIT_ASSERT(handles[i].CalcDelay(now).Defined());
                         }
                     }
                 }
@@ -157,5 +157,33 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
         Cerr << result[0].MicroSeconds() << " " << result[1].MicroSeconds() << Endl;
         AssertEq(result[0], all/4, TDuration::MilliSeconds(20));
         AssertEq(result[1], 3*all/4, TDuration::MilliSeconds(20));
+    }
+
+    Y_UNIT_TEST(MultipleClients) {
+        NKikimr::NKqp::TComputeScheduler scheduler;
+        TComputeScheduler::TDistributionRule rule{.Share = 0.5};
+        auto start = TMonotonic::Now();
+        rule.SubRules.push_back({.Share = 1, .Name = "first"});
+        rule.SubRules.push_back({.Share = 1, .Name = "second"});
+        static const size_t executors = 10;
+
+        scheduler.SetPriorities(rule, executors, start);
+        TVector<TProcess> processes;
+        const size_t processesCount = 3000;
+
+        TDuration cuanta = TDuration::MicroSeconds(200);
+
+        for (size_t i = 0; i < processesCount; ++i) {
+            processes.push_back({"first", 1, cuanta});
+        }
+
+        TDuration all = TDuration::Seconds(3);
+
+
+        auto result = RunSimulation(scheduler, processes, all, executors, start);
+
+        for (auto res : result) {
+            AssertEq(res, all/processesCount * executors /2, cuanta);
+        }
     }
 }

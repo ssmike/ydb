@@ -40,6 +40,7 @@ public:
     TMaybe<TDuration> CalcDelay(TMonotonic now);
 
     TMaybe<TDuration> Lag(TMonotonic now);
+    double GroupNow(TMonotonic now);
 
     double EstimateWeight(TMonotonic now, TDuration minTime);
 
