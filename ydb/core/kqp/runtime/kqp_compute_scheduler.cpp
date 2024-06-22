@@ -11,6 +11,7 @@ namespace {
 
     static constexpr double MinEntitiesWeight = 1e-8;
 
+    static constexpr TDuration AvgBatch = TDuration::MicroSeconds(700);
 }
 
 namespace NKikimr {
@@ -105,7 +106,8 @@ public:
         bool Disabled = false;
         double EntitiesWeight = 0;
 
-        size_t AllowTrackUsec = 0;
+        ssize_t AllowTrackUsec = 0;
+        ssize_t TrackedBefore = 0;
 
         double GroupNow(TMonotonic now) const {
             if (EntitiesWeight < MinEntitiesWeight) {
@@ -127,7 +129,7 @@ public:
     double Vruntime = 0;
     double Vstart;
 
-    TDuration BatchTime = TDuration::MicroSeconds(700);
+    TDuration BatchTime = AvgBatch;
 
     void TrackTime(TDuration time) {
         Vruntime += FromDuration(time) / Weight;
@@ -138,10 +140,11 @@ public:
     TMaybe<TDuration> GroupDelay(TMonotonic now) {
         auto group = Group->MutableStats.Current();
         auto limit = group.get()->AllowTrackUsec + (now - group.get()->LastNowRecalc).MicroSeconds() * group.get()->Weight;
-        if (limit < Group->TrackedMicroSeconds) {
+        auto tracked = AtomicGet(Group->TrackedMicroSeconds) - group.get()->TrackedBefore;
+        if (limit < tracked) {
             return {};
         } else {
-            return BatchTime * Group->Delayed;
+            return BatchTime * Group->Delayed + ToDuration(tracked / Weight);
         }
     }
 
@@ -356,6 +359,11 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
                 v.Next()->Now += delta = FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
             v.Next()->LastNowRecalc = now;
+            v.Next()->TrackedBefore = AtomicGet(Impl->Records[i]->TrackedMicroSeconds);
+
+            auto limit = group.get()->AllowTrackUsec + FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight + group.get()->TrackedBefore;
+            v.Next()->AllowTrackUsec = Min<ssize_t>(limit - v.Next()->TrackedBefore, AvgBatch.MicroSeconds() * AtomicGet(Impl->Records[i]->Delayed));
+
             // Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
             if (Impl->VtimeCounters.size() > i && Impl->VtimeCounters[i]) {
                 Impl->VtimeCounters[i]->Add(delta);
