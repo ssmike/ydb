@@ -832,6 +832,7 @@ TKqpCounters::TKqpCounters(const ::NMonitoring::TDynamicCounterPtr& counters, co
     ScheduledActorsRuns = KqpGroup->GetHistogram("NodeScheduler/ActorRunsUs", NMonitoring::ExponentialHistogram(20, 2, 1));
     SchedulerDelays = KqpGroup->GetHistogram("NodeScheduler/SchedulerDelaysUs", NMonitoring::ExponentialHistogram(20, 2, 1));
     ScheduledActorsActivationsCount = KqpGroup->GetCounter("NodeScheduler/Activations", true);
+    SchedulerVisibleLag = KqpGroup->GetHistogram("NodeScheduler/ActorActivationVisibleLagUs", NMonitoring::ExponentialHistogram(20, 2, 1));
 }
 
 ::NMonitoring::TDynamicCounterPtr TKqpCounters::GetKqpCounters() const {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <util/datetime/base.h>
+#include <util/system/hp_timer.h>
 
 #include <ydb/core/kqp/counters/kqp_counters.h>
 
@@ -40,6 +41,7 @@ public:
     TMaybe<TDuration> CalcDelay(TMonotonic now);
 
     TMaybe<TDuration> Lag(TMonotonic now);
+    //double LagVTime(TMonotonic now);
     double GroupNow(TMonotonic now);
 
     double EstimateWeight(TMonotonic now, TDuration minTime);
@@ -122,7 +124,7 @@ struct TEvSchedulerRenice : public TEventLocal<TEvSchedulerRenice, TKqpComputeSc
     }
 };
 
-struct TEvSchedulerReniceConfirm : public TEventLocal<TEvSchedulerRenice, TKqpComputeSchedulerEvents::EvReniceConfirm> {
+struct TEvSchedulerReniceConfirm : public TEventLocal<TEvSchedulerReniceConfirm, TKqpComputeSchedulerEvents::EvReniceConfirm> {
     TSchedulerEntityHandle SchedulerEntity;
 
     TEvSchedulerReniceConfirm(TSchedulerEntityHandle entity)
@@ -141,6 +143,7 @@ private:
     static constexpr TDuration ReniceTimeout = TDuration::Seconds(1);
     static constexpr TDuration MaxLag = TDuration::MilliSeconds(10);
     static constexpr TDuration MinDelay = TDuration::MilliSeconds(10);
+    static constexpr double SecToUsec = 1e6;
 
 public:
     template<typename... TArgs>
@@ -246,22 +249,23 @@ protected:
         TMonotonic now = *ExecuteStart;
         TMaybe<TDuration> delay = CalcDelay(*ExecuteStart);
         bool executed = false;
-        //delay.Clear();
         Counters->ScheduledActorsActivationsCount->Inc();
         if (NoThrottle || !delay) {
             ReportThrottledTime(now);
             executed = true;
 
+            THPTimer timer;
             TBase::DoExecuteImpl();
+
+            double passed = timer.Passed() * SecToUsec;
+
             if (Finished) {
                 return;
             }
-            now = NActors::TlsActivationContext->Monotonic();
-            SelfHandle.TrackTime(now - *ExecuteStart);
-            Counters->ScheduledActorsRuns->Collect((now - *ExecuteStart).MicroSeconds());
-            //delay = SelfHandle.CalcDelay(now);
+            SelfHandle.TrackTime(TDuration::MicroSeconds(passed));
+            Counters->ScheduledActorsRuns->Collect(passed);
             if (GroupUsage) {
-                GroupUsage->Add((now - *ExecuteStart).MicroSeconds());
+                GroupUsage->Add(passed);
             }
         }
         if (delay) {
@@ -270,10 +274,10 @@ protected:
             }
             CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec ");
             Counters->SchedulerDelays->Collect(delay->MicroSeconds());
-            this->Schedule(now + *delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
+            this->Schedule(*delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
 
-        if (executed && delay) {
+        if (!executed && delay) {
             Throttled = now;
         }
         ExecuteStart.Clear();
@@ -281,6 +285,7 @@ protected:
 
     TMaybe<TDuration> CalcDelay(NMonotonic::TMonotonic now) {
         auto result = SelfHandle.CalcDelay(now);
+        Counters->SchedulerVisibleLag->Collect(result.GetOrElse(TDuration::Zero()).MicroSeconds());
         if (NoThrottle || (result && *result < MinDelay)) {
             return {};
         } else {

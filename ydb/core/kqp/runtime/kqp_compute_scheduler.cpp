@@ -130,25 +130,36 @@ public:
     TMaybe<TDuration> CalcDelay(TMonotonic now) {
         auto group = Group->MutableStats.Current();
         Y_ENSURE(!group.get()->Disabled);
-        double lagTime = (Vruntime - (group.get()->Now - Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
-        double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
-        if (neededTime <= 0) {
+        double lag = Vruntime - (group.get()->GroupNow(now) - Vstart);
+        if (lag <= 0) {
             return Nothing();
         } else {
-            return ToDuration(neededTime);
+            return ToDuration(lag * group.get()->EntitiesWeight / group.get()->Weight);
         }
+        //double lagTime = (Vruntime - (group.get()->Now - Vstart)) * group.get()->EntitiesWeight / group.get()->Weight;
+        //double neededTime = lagTime - FromDuration(now - group.get()->LastNowRecalc);
+        //if (neededTime <= 0) {
+        //    return Nothing();
+        //} else {
+        //    return ToDuration(neededTime);
+        //}
     }
 
     TMaybe<TDuration> Lag(TMonotonic now) {
         auto group = Group->MutableStats.Current();
         Y_ENSURE(!group.get()->Disabled);
-        double lagTime = (FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight + (group.get()->Now - Vstart) - Vruntime) * Weight;
+        double lagTime = (group.get()->GroupNow(now) - Vstart - Vruntime) * Weight;
         if (lagTime <= 0) {
             return Nothing();
         } else {
             return ToDuration(lagTime);
         }
     }
+
+    //double LagVTime(TMonotonic now) {
+    //    auto group = Group->MutableStats.Current();
+    //    return FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight + group.get()->Now - (Vruntime - Vstart)
+    //}
 
     double EstimateWeight(TMonotonic now, TDuration minTime) {
         double vruntime = Max(Vruntime, FromDuration(minTime) / Weight);
@@ -314,13 +325,14 @@ void TComputeScheduler::AdvanceTime(TMonotonic now) {
         auto& v = Impl->Records[i]->MutableStats;
         {
             auto group = v.Current();
+            double delta = 0;
             if (!group.get()->Disabled && group.get()->EntitiesWeight > MinEntitiesWeight) {
-                v.Next()->Now += FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
+                v.Next()->Now += delta = FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight / group.get()->EntitiesWeight;
             }
             v.Next()->LastNowRecalc = now;
             // Cerr << v->Next()->EntitiesWeight << " entities " << v->Next()->Weight << " weight" << Endl;
             if (Impl->VtimeCounters.size() > i && Impl->VtimeCounters[i]) {
-                Impl->VtimeCounters[i]->Set(v.Next()->Now);
+                Impl->VtimeCounters[i]->Add(delta);
                 Impl->EntitiesWeightCounters[i]->Set(v.Next()->EntitiesWeight);
                 Impl->LimitCounters[i]->Add(FromDuration(now - group.get()->LastNowRecalc) * group.get()->Weight);
             }
@@ -353,6 +365,10 @@ TMaybe<TDuration> TSchedulerEntityHandle::CalcDelay(TMonotonic now) {
 TMaybe<TDuration> TSchedulerEntityHandle::Lag(TMonotonic now) {
     return Ptr->Lag(now);
 }
+
+//double TSchedulerEntityHandle::LagVTime(TMonotonic now) {
+//    return Ptr->LagVTime(now);
+//}
 
 double TSchedulerEntityHandle::GroupNow(TMonotonic now) {
     return Ptr->Group->MutableStats.Current().get()->GroupNow(now);

@@ -92,7 +92,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
                 }
             }
             now = newDeadline;
-            scheduler.AdvanceTime(now);
+            //scheduler.AdvanceTime(now);
         }
 
         return runTimes;

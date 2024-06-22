@@ -281,7 +281,7 @@ private:
             if (msg.GetSchedulerGroup().empty()) {
                 schedulingOptions.NoThrottle = true;
             } else {
-                schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
+                //schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
             }
 
             taskCtx.ComputeActorId = CaFactory()->CreateKqpComputeActor(
