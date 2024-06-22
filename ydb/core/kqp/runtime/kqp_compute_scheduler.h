@@ -232,6 +232,9 @@ public:
 
 private:
     void ReportThrottledTime(TMonotonic now) {
+        if (Throttled) {
+            SelfHandle.SetEnabled(now, true);
+        }
         if (Counters && Throttled) {
             Counters->SchedulerThrottled->Add((now - *Throttled).MicroSeconds());
             Throttled.Clear();
@@ -280,7 +283,8 @@ protected:
             this->Schedule(*delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
         }
 
-        if (!executed && delay) {
+        if (!executed && !Throttled) {
+            SelfHandle.SetEnabled(now, false);
             Throttled = now;
         }
         ExecuteStart.Clear();

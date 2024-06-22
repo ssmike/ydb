@@ -127,9 +127,12 @@ public:
     double Vruntime = 0;
     double Vstart;
 
+    TDuration BatchTime = TDuration::MicroSeconds(700);
+
     void TrackTime(TDuration time) {
         Vruntime += FromDuration(time) / Weight;
         AtomicAdd(Group->TrackedMicroSeconds, time.MicroSeconds());
+        BatchTime = (time * 2 + BatchTime * 8) / 10;
     }
 
     TMaybe<TDuration> GroupDelay(TMonotonic now) {
@@ -138,6 +141,7 @@ public:
         if (limit < Group->TrackedMicroSeconds) {
             return {};
         } else {
+            return BatchTime * Group->Delayed;
         }
     }
 
