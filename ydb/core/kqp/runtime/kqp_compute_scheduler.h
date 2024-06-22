@@ -40,6 +40,9 @@ public:
     void TrackTime(TDuration time);
     TMaybe<TDuration> CalcDelay(TMonotonic now);
 
+    TMaybe<TDuration> GroupDelay(TMonotonic now);
+    void SetEnabled(TMonotonic now, bool enabled);
+
     TMaybe<TDuration> Lag(TMonotonic now);
     //double LagVTime(TMonotonic now);
     double GroupNow(TMonotonic now);
@@ -284,7 +287,7 @@ protected:
     }
 
     TMaybe<TDuration> CalcDelay(NMonotonic::TMonotonic now) {
-        auto result = SelfHandle.CalcDelay(now);
+        auto result = SelfHandle.GroupDelay(now);
         Counters->SchedulerVisibleLag->Collect(result.GetOrElse(TDuration::Zero()).MicroSeconds());
         if (NoThrottle || (result && *result < MinDelay)) {
             return {};

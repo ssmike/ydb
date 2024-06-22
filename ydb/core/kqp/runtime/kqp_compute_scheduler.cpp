@@ -105,6 +105,8 @@ public:
         bool Disabled = false;
         double EntitiesWeight = 0;
 
+        size_t AllowTrackUsec = 0;
+
         double GroupNow(TMonotonic now) const {
             if (EntitiesWeight < MinEntitiesWeight) {
                 return Now;
@@ -115,6 +117,8 @@ public:
     };
 
     struct TGroupRecord {
+        TAtomic TrackedMicroSeconds;
+        TAtomic Delayed = 0;
         TMultithreadPublisher<TGroupMutableStats> MutableStats;
     };
 
@@ -125,6 +129,24 @@ public:
 
     void TrackTime(TDuration time) {
         Vruntime += FromDuration(time) / Weight;
+        AtomicAdd(Group->TrackedMicroSeconds, time.MicroSeconds());
+    }
+
+    TMaybe<TDuration> GroupDelay(TMonotonic now) {
+        auto group = Group->MutableStats.Current();
+        auto limit = group.get()->AllowTrackUsec + (now - group.get()->LastNowRecalc).MicroSeconds() * group.get()->Weight;
+        if (limit < Group->TrackedMicroSeconds) {
+            return {};
+        } else {
+        }
+    }
+
+    void SetEnabled(TMonotonic /* now */, bool enabled) {
+        if (enabled) {
+            AtomicIncrement(Group->Delayed);
+        } else {
+            AtomicDecrement(Group->Delayed);
+        }
     }
 
     TMaybe<TDuration> CalcDelay(TMonotonic now) {
@@ -360,6 +382,14 @@ void TSchedulerEntityHandle::TrackTime(TDuration time) {
 
 TMaybe<TDuration> TSchedulerEntityHandle::CalcDelay(TMonotonic now) {
     return Ptr->CalcDelay(now);
+}
+
+TMaybe<TDuration> TSchedulerEntityHandle::GroupDelay(TMonotonic now) {
+    return Ptr->GroupDelay(now);
+}
+
+void TSchedulerEntityHandle::SetEnabled(TMonotonic now, bool enabled) {
+    Ptr->SetEnabled(now, enabled);
 }
 
 TMaybe<TDuration> TSchedulerEntityHandle::Lag(TMonotonic now) {
