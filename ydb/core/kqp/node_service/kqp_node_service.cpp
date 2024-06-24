@@ -133,12 +133,12 @@ private:
 
     void HandleWork(TEvSchedulerDeregister::TPtr& ev) {
         if (ev->Get()->SchedulerEntity) {
-            Scheduler.Deregister(*ev->Get()->SchedulerEntity, TlsActivationContext->Monotonic());
+            Scheduler.Deregister(*ev->Get()->SchedulerEntity, TMonotonic::Now());
         }
     }
 
     void HandleWork(TEvSchedulerRenice::TPtr& ev) {
-        auto now = TlsActivationContext->Monotonic();
+        auto now = TMonotonic::Now();
         if (ev->Get()->SchedulerEntity) {
             Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
         }
@@ -281,7 +281,7 @@ private:
             if (msg.GetSchedulerGroup().empty()) {
                 schedulingOptions.NoThrottle = true;
             } else {
-                //schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
+                schedulingOptions.Handle = Scheduler.Enroll(schedulingOptions.Group, schedulingOptions.Weight, schedulingOptions.Now);
             }
 
             taskCtx.ComputeActorId = CaFactory()->CreateKqpComputeActor(

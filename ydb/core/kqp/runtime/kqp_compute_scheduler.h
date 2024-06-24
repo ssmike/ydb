@@ -73,6 +73,7 @@ public:
     void ReportCounters(TIntrusivePtr<TKqpCounters>);
 
     void SetPriorities(TDistributionRule rootRule, double cores, TMonotonic now);
+    void SetMaxDeviation(TDuration);
 
     TSchedulerEntityHandle Enroll(TString group, double weight, TMonotonic now);
 
@@ -136,16 +137,14 @@ struct TEvSchedulerReniceConfirm : public TEventLocal<TEvSchedulerReniceConfirm,
     }
 };
 
-
 template<typename TDerived>
 class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<TDerived> {
 private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
 
-    static constexpr TDuration MaxDelay = TDuration::MilliSeconds(100);
-    static constexpr TDuration ReniceTimeout = TDuration::Seconds(1);
-    static constexpr TDuration MaxLag = TDuration::MilliSeconds(10);
-    static constexpr TDuration MinDelay = TDuration::MilliSeconds(10);
+    static constexpr TDuration ReniceTimeout = TDuration::MilliSeconds(500);
+    static constexpr double ReniceGap = 1.03;
+    static constexpr TDuration MinReserveTime = TDuration::MilliSeconds(1);
     static constexpr double SecToUsec = 1e6;
 
 public:
@@ -158,6 +157,7 @@ public:
         , Counters(options.Counters)
         , Group(options.Group)
         , Weight(options.Weight)
+        , EffectiveWeight(options.Weight)
     {
         if (!NoThrottle) {
             //SelfHandle.TrackTime(Lag);
@@ -172,6 +172,11 @@ public:
     static constexpr ui64 ResumeWakeupTag = 201;
     static constexpr ui64 ReniceWakeupTag = 202;
 
+    TMonotonic Now() {
+        //return TMonotonic::Now();
+        return TlsActivationContext->Monotonic();
+    }
+
     void HandleWakeup(NActors::TEvents::TEvWakeup::TPtr& ev) {
         auto tag = ev->Get()->Tag;
         CA_LOG_D("wakeup with tag " << tag);
@@ -180,16 +185,22 @@ public:
         } else if (tag == ReniceWakeupTag) {
             Y_ABORT_UNLESS(SelfHandle);
             ReniceWakeupScheduled = false;
-            auto now = TlsActivationContext->Monotonic();
-            if (auto lag = SelfHandle.Lag(now)) {
-                if (*lag >= MaxLag) {
-                    return DoRenice(Min(Weight, SelfHandle.EstimateWeight(now, TDuration::MilliSeconds(1)) * 1.05));
-                }
+            auto now = Now();
+            auto newWeight = Min(Weight, SelfHandle.EstimateWeight(now, MinReserveTime) * ReniceGap);
+            EffectiveWeight = newWeight;
+            if (newWeight > EffectiveWeight) {
+                return DoRenice(Weight);
+            } else {
+                return DoRenice(newWeight);
             }
             ScheduleReniceWakeup();
         } else {
             TBase::HandleExecuteBase(ev);
         }
+    }
+
+    void DoBootstrap() {
+        ScheduleReniceWakeup();
     }
 
     void ScheduleReniceWakeup() {
@@ -251,7 +262,7 @@ protected:
             }
         }
 
-        ExecuteStart = NActors::TlsActivationContext->Monotonic();
+        ExecuteStart = Now();
         TMonotonic now = *ExecuteStart;
         TMaybe<TDuration> delay = CalcDelay(*ExecuteStart);
         bool executed = false;
@@ -275,9 +286,6 @@ protected:
             }
         }
         if (delay) {
-            if (*delay > MaxDelay) {
-                delay = MaxDelay;
-            }
             CA_LOG_D("schedule wakeup after " << delay->MicroSeconds() << " msec ");
             Counters->SchedulerDelays->Collect(delay->MicroSeconds());
             this->Schedule(*delay, new NActors::TEvents::TEvWakeup(ResumeWakeupTag));
@@ -291,9 +299,10 @@ protected:
     }
 
     TMaybe<TDuration> CalcDelay(NMonotonic::TMonotonic now) {
-        auto result = SelfHandle.GroupDelay(now);
-        Counters->SchedulerVisibleLag->Collect(result.GetOrElse(TDuration::Zero()).MicroSeconds());
-        if (NoThrottle || (result && *result < MinDelay)) {
+        //auto result = SelfHandle.GroupDelay(now);
+        auto result = SelfHandle.CalcDelay(now);
+        Counters->SchedulerVisibleLag->Collect(SelfHandle.Lag(now).GetOrElse(TDuration::Zero()).MicroSeconds());
+        if (NoThrottle || result) {
             return {};
         } else {
             return result;
@@ -325,6 +334,7 @@ private:
 
     TString Group;
     double Weight;
+    double EffectiveWeight;
 
     bool ReniceWakeupScheduled = false;
     bool RunningRenice = false;
