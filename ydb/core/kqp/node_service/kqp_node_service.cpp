@@ -107,7 +107,7 @@ public:
 private:
     STATEFN(WorkState) {
         Y_DEFER {
-            Scheduler.AdvanceTime(TlsActivationContext->Monotonic());
+            Scheduler.AdvanceTime(TMonotonic::Now());
         };
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpNode::TEvStartKqpTasksRequest, HandleWork);
@@ -259,7 +259,7 @@ private:
         const TString& serializedGUCSettings = ev->Get()->Record.HasSerializedGUCSettings() ?
             ev->Get()->Record.GetSerializedGUCSettings() : "";
 
-        auto schedulerNow = TlsActivationContext->Monotonic();
+        auto schedulerNow = TMonotonic::Now();
 
         // start compute actors
         const ui32 tasksCount = msg.GetTasks().size();
@@ -444,7 +444,7 @@ private:
         Y_ENSURE(poolStats.MaxThreadCount > 0);
         Counters->SchedulerCapacity->Set(poolStats.MaxThreadCount);
 
-        Scheduler.SetPriorities(rule, poolStats.MaxThreadCount, TlsActivationContext->Monotonic());
+        Scheduler.SetPriorities(rule, poolStats.MaxThreadCount, TMonotonic::Now());
     }
 
     void SetIteratorReadsRetrySettings(const NKikimrConfig::TTableServiceConfig::TIteratorReadsRetrySettings& settings) {

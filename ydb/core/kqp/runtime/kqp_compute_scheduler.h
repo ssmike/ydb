@@ -37,7 +37,7 @@ public:
 
     double VRuntime();
 
-    void TrackTime(TDuration time);
+    void TrackTime(TDuration time, TMonotonic now);
     TMaybe<TDuration> CalcDelay(TMonotonic now);
 
     TMaybe<TDuration> GroupDelay(TMonotonic now);
@@ -173,8 +173,8 @@ public:
     static constexpr ui64 ReniceWakeupTag = 202;
 
     TMonotonic Now() {
-        //return TMonotonic::Now();
-        return TlsActivationContext->Monotonic();
+        return TMonotonic::Now();
+        //return TlsActivationContext->Monotonic();
     }
 
     void HandleWakeup(NActors::TEvents::TEvWakeup::TPtr& ev) {
@@ -200,7 +200,7 @@ public:
     }
 
     void DoBootstrap() {
-        ScheduleReniceWakeup();
+        //ScheduleReniceWakeup();
     }
 
     void ScheduleReniceWakeup() {
@@ -279,7 +279,7 @@ protected:
             if (Finished) {
                 return;
             }
-            SelfHandle.TrackTime(TDuration::MicroSeconds(passed));
+            SelfHandle.TrackTime(TDuration::MicroSeconds(passed), now);
             Counters->ScheduledActorsRuns->Collect(passed);
             if (GroupUsage) {
                 GroupUsage->Add(passed);
@@ -312,7 +312,8 @@ protected:
     void PassAway() override {
         Finished = true;
         if (ExecuteStart && SelfHandle) {
-            SelfHandle.TrackTime(NActors::TlsActivationContext->Monotonic() - *ExecuteStart);
+            auto now = Now();
+            SelfHandle.TrackTime(now - *ExecuteStart, now);
         }
         if (SelfHandle) {
             auto finishEv = MakeHolder<TEvSchedulerDeregister>(std::move(SelfHandle));

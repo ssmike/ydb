@@ -836,6 +836,7 @@ TKqpCounters::TKqpCounters(const ::NMonitoring::TDynamicCounterPtr& counters, co
 
     SchedulerTrackedUs = KqpGroup->GetCounter("NodeScheduler/TrackedUs", false);
     SchedulerLimitUs = KqpGroup->GetCounter("NodeScheduler/LimitUs", false);
+    SchedulerClock = KqpGroup->GetCounter("NodeScheduler/Clock", true);
 }
 
 ::NMonitoring::TDynamicCounterPtr TKqpCounters::GetKqpCounters() const {

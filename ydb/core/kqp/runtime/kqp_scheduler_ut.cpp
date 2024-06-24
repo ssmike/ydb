@@ -80,7 +80,7 @@ Y_UNIT_TEST_SUITE(TKqpComputeScheduler) {
                 size_t taskToRun = runQueue[0];
                 events[taskToRun] = TEvent{TEvent::EEventType::Sleep, now + processes[taskToRun].Cuanta};
                 runTimes[taskToRun] += processes[taskToRun].Cuanta;
-                handles[taskToRun].TrackTime(processes[taskToRun].Cuanta);
+                handles[taskToRun].TrackTime(processes[taskToRun].Cuanta, now);
                 runQueue.erase(runQueue.begin());
             }
 

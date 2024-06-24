@@ -413,6 +413,7 @@ public:
     NMonitoring::THistogramPtr SchedulerVisibleLag;
     ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerTrackedUs;
     ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerLimitUs;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SchedulerClock;
 
     // Sequences counters
     ::NMonitoring::TDynamicCounters::TCounterPtr SequencerActorsCount;
