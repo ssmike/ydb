@@ -49,6 +49,8 @@ public:
 
     double EstimateWeight(TMonotonic now, TDuration minTime);
 
+    TString DebugRepr(TMonotonic now);
+
     void Clear();
 
     ~TSchedulerEntityHandle();
@@ -80,6 +82,7 @@ public:
     void AdvanceTime(TMonotonic now);
 
     void Deregister(TSchedulerEntity& self, TMonotonic now);
+    void Renice(TSchedulerEntity& self, TMonotonic now, double newWeight);
 
 private:
     struct TImpl;
@@ -118,12 +121,10 @@ struct TEvSchedulerDeregister : public TEventLocal<TEvSchedulerDeregister, TKqpC
 struct TEvSchedulerRenice : public TEventLocal<TEvSchedulerRenice, TKqpComputeSchedulerEvents::EvRenice> {
     TSchedulerEntityHandle SchedulerEntity;
     double DesiredWeight;
-    TString DesiredGroup;
 
-    TEvSchedulerRenice(TSchedulerEntityHandle handle, double weight, TString desiredGroup)
+    TEvSchedulerRenice(TSchedulerEntityHandle handle, double weight)
         : SchedulerEntity(std::move(handle))
         , DesiredWeight(weight)
-        , DesiredGroup(desiredGroup)
     {
     }
 };
@@ -142,9 +143,10 @@ class TSchedulableComputeActorBase : public NYql::NDq::TDqSyncComputeActorBase<T
 private:
     using TBase = NYql::NDq::TDqSyncComputeActorBase<TDerived>;
 
-    static constexpr TDuration ReniceTimeout = TDuration::MilliSeconds(500);
-    static constexpr double ReniceGap = 1.03;
-    static constexpr TDuration MinReserveTime = TDuration::MilliSeconds(1);
+    static constexpr TDuration ReniceTimeout = TDuration::Seconds(1);
+    static constexpr double ReniceGap = 1.05;
+    static constexpr double BoostGap = 1.04;
+    static constexpr TDuration MinReserveTime = TDuration::MicroSeconds(1);
     static constexpr double SecToUsec = 1e6;
 
 public:
@@ -186,13 +188,18 @@ public:
             Y_ABORT_UNLESS(SelfHandle);
             ReniceWakeupScheduled = false;
             auto now = Now();
-            auto newWeight = Min(Weight, SelfHandle.EstimateWeight(now, MinReserveTime) * ReniceGap);
-            EffectiveWeight = newWeight;
-            if (newWeight > EffectiveWeight) {
-                return DoRenice(Weight);
-            } else {
-                return DoRenice(newWeight);
-            }
+            //if (SelfHandle.Lag(now)) {
+                auto newWeight = SelfHandle.EstimateWeight(now, MinReserveTime);
+                Cerr << (TStringBuilder() << "running renice " << SelfHandle.DebugRepr(now) << " new weight " << newWeight) << Endl;
+                if (newWeight >= EffectiveWeight * BoostGap) {
+                    EffectiveWeight = Weight;
+                    return DoRenice(Weight);
+                } else {
+                    EffectiveWeight = Min(newWeight, Weight);
+                    newWeight = Min(Weight, newWeight * ReniceGap);
+                    return DoRenice(newWeight);
+                }
+            //}
             ScheduleReniceWakeup();
         } else {
             TBase::HandleExecuteBase(ev);
@@ -200,7 +207,7 @@ public:
     }
 
     void DoBootstrap() {
-        //ScheduleReniceWakeup();
+        ScheduleReniceWakeup();
     }
 
     void ScheduleReniceWakeup() {
@@ -215,15 +222,16 @@ public:
         if (RunningRenice) {
             return;
         }
+        Counters->SchedulerRenices->Collect(newWeight * 100000);
         RunningRenice = true;
-        Counters->SchedulerRenices->Inc();
-        auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), newWeight, Group);
+        auto renice = MakeHolder<TEvSchedulerRenice>(std::move(SelfHandle), newWeight/*, Group*/);
         this->Send(NodeService, renice.Release());
     }
 
     void HandleWork(TEvSchedulerReniceConfirm::TPtr& ev) {
         RunningRenice = false;
         SelfHandle = std::move(ev->Get()->SchedulerEntity);
+        ScheduleReniceWakeup();
         TBase::DoExecute();
     }
 
@@ -258,7 +266,7 @@ protected:
             if (NoThrottle) {
                 return TBase::DoExecuteImpl();
             } else {
-                return DoRenice(Weight);
+                return;
             }
         }
 
@@ -302,7 +310,7 @@ protected:
         //auto result = SelfHandle.GroupDelay(now);
         auto result = SelfHandle.CalcDelay(now);
         Counters->SchedulerVisibleLag->Collect(SelfHandle.Lag(now).GetOrElse(TDuration::Zero()).MicroSeconds());
-        if (NoThrottle || result) {
+        if (NoThrottle || !result.Defined()) {
             return {};
         } else {
             return result;

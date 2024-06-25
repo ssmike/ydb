@@ -139,13 +139,8 @@ private:
 
     void HandleWork(TEvSchedulerRenice::TPtr& ev) {
         auto now = TMonotonic::Now();
-        if (ev->Get()->SchedulerEntity) {
-            Scheduler.Deregister(*ev->Get()->SchedulerEntity, now);
-        }
-        TSchedulerEntityHandle handle;
-        if (ev->Get()->DesiredWeight != 0) {
-            handle = Scheduler.Enroll(ev->Get()->DesiredGroup, ev->Get()->DesiredWeight, now);
-        }
+        TSchedulerEntityHandle handle = std::move(ev->Get()->SchedulerEntity);
+        Scheduler.Renice(*handle, now, ev->Get()->DesiredWeight);
         auto reniceConfirm = MakeHolder<TEvSchedulerReniceConfirm>(std::move(handle));
         this->Send(ev->Sender, reniceConfirm.Release());
     }
