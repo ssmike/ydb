@@ -4103,6 +4103,50 @@ Y_UNIT_TEST_SUITE(KqpNewEngine) {
     }
 
 
+    Y_UNIT_TEST(WorkersTest) {
+        TKikimrSettings settings;
+
+        auto kikimr = DefaultKikimrRunner();
+        auto db = kikimr.GetTableClient();
+        {
+            auto session = db.CreateSession().GetValueSync().GetSession();
+            AssertSuccessResult(session.ExecuteSchemeQuery(R"(
+                --!syntax_v1
+
+                CREATE TABLE `/Root/Sample` (
+                    shard_id   Uint32,
+                    worker     Utf8,
+                    offer_id   Utf8,
+                    next_check Timestamp,
+                    PRIMARY KEY (shard_id, worker, offer_id)
+                );
+
+            )").GetValueSync());
+        }
+
+        auto session = db.CreateSession().GetValueSync().GetSession();
+
+        NYdb::NTable::TExecDataQuerySettings querySettings;
+        querySettings.CollectQueryStats(ECollectQueryStatsMode::Profile);
+        auto result = session.ExecuteDataQuery(R"(
+            delete from workers_queue
+            where shard_id = 62
+            and worker = 'idx_stage_fix_enabled_ydb'
+            and offer_id in (
+              select offer_id 
+              from workers_queue 
+              where shard_id = 62
+              and worker = 'idx_stage_fix_enabled_ydb'
+              and next_check is null
+              limit 1000
+            )
+            and next_check is null;
+        )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx(), querySettings).GetValueSync();
+
+        AssertSuccessResult(result);
+        //AssertTableReads(result, "/Root/Sample", NewPredicateExtract ? 2 : 4);
+        //CompareYson(R"([[[1u];[2u]];[[2u];[2u]]])", FormatResultSetYson(result.GetResultSet(0)));
+    }
 
 }
 
