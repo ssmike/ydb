@@ -4113,7 +4113,7 @@ Y_UNIT_TEST_SUITE(KqpNewEngine) {
             AssertSuccessResult(session.ExecuteSchemeQuery(R"(
                 --!syntax_v1
 
-                CREATE TABLE `/Root/Sample` (
+                CREATE TABLE `/Root/workers_queue` (
                     shard_id   Uint32,
                     worker     Utf8,
                     offer_id   Utf8,
