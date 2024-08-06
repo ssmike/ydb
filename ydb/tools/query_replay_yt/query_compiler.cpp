@@ -340,8 +340,6 @@ private:
 
             AsyncCompileResultOld->Continue().Apply(callback);
         }
-
-        AsyncCompileResult->Continue().Apply(callback);
     }
 
     NJson::TJsonValue ExtractQueryPlan(const TString& plan) {
