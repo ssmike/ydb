@@ -229,11 +229,17 @@ public:
         : ModuleResolverState(moduleResolverState)
         , KqpSettings()
         , Config(MakeIntrusive<TKikimrConfiguration>())
+        , ConfigOld(MakeIntrusive<TKikimrConfiguration>())
         , FunctionRegistry(functionRegistry)
         , HttpGateway(std::move(httpGateway))
     {
         Config->EnableKqpScanQueryStreamLookup = true;
         Config->EnablePreparedDdl = true;
+        Config->IndexAutoChooserMode = NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode::TTableServiceConfig_EIndexAutoChooseMode_MAX_USED_PREFIX;
+
+        ConfigOld->EnableKqpScanQueryStreamLookup = true;
+        ConfigOld->EnablePreparedDdl = true;
+        ConfigOld->IndexAutoChooserMode = NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode::TTableServiceConfig_EIndexAutoChooseMode_DISABLED;
     }
 
     void Bootstrap() {
@@ -278,26 +284,32 @@ private:
         switch (Query->Settings.QueryType) {
             case NKikimrKqp::QUERY_TYPE_SQL_DML:
                 AsyncCompileResult = KqpHost->PrepareDataQuery(Query->Text, prepareSettings);
+                AsyncCompileResultOld = KqpHostOld->PrepareDataQuery(Query->Text, prepareSettings);
                 break;
 
             case NKikimrKqp::QUERY_TYPE_AST_DML:
                 AsyncCompileResult = KqpHost->PrepareDataQueryAst(Query->Text, prepareSettings);
+                AsyncCompileResultOld = KqpHostOld->PrepareDataQueryAst(Query->Text, prepareSettings);
                 break;
 
             case NKikimrKqp::QUERY_TYPE_SQL_SCAN:
             case NKikimrKqp::QUERY_TYPE_AST_SCAN:
                 AsyncCompileResult = KqpHost->PrepareScanQuery(Query->Text, Query->IsSql(), prepareSettings);
+                AsyncCompileResultOld = KqpHostOld->PrepareScanQuery(Query->Text, Query->IsSql(), prepareSettings);
                 break;
             case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_SCRIPT:
                 AsyncCompileResult = KqpHost->PrepareGenericScript(Query->Text, prepareSettings);
+                AsyncCompileResultOld = KqpHostOld->PrepareGenericScript(Query->Text, prepareSettings);
                 break;
             case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_QUERY: {
                 prepareSettings.ConcurrentResults = false;
                 AsyncCompileResult = KqpHost->PrepareGenericQuery(Query->Text, prepareSettings, nullptr);
+                AsyncCompileResultOld = KqpHostOld->PrepareGenericQuery(Query->Text, prepareSettings, nullptr);
                 break;
             }
             case NKikimrKqp::QUERY_TYPE_SQL_GENERIC_CONCURRENT_QUERY: {
                 AsyncCompileResult = KqpHost->PrepareGenericQuery(Query->Text, prepareSettings, nullptr);
+                AsyncCompileResultOld = KqpHostOld->PrepareGenericQuery(Query->Text, prepareSettings, nullptr);
                 break;
             }
 
@@ -308,11 +320,26 @@ private:
     void Continue() {
         TActorSystem* actorSystem = TlsActivationContext->ExecutorThread.ActorSystem;
         TActorId selfId = SelfId();
-        auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
-            bool finished = future.GetValue();
-            auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(0, finished);
-            actorSystem->Send(selfId, processEv.Release());
-        };
+        if (Stopped) {
+            Stopped = false;
+            auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
+                bool finished = future.GetValue();
+                auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(0, finished);
+                actorSystem->Send(selfId, processEv.Release());
+            };
+
+            AsyncCompileResult->Continue().Apply(callback);
+        } 
+        if (OldStopped) {
+            OldStopped = false;
+            auto callback = [actorSystem, selfId](const TFuture<bool>& future) {
+                bool finished = future.GetValue();
+                auto processEv = MakeHolder<TEvKqp::TEvContinueProcess>(1, finished);
+                actorSystem->Send(selfId, processEv.Release());
+            };
+
+            AsyncCompileResultOld->Continue().Apply(callback);
+        }
 
         AsyncCompileResult->Continue().Apply(callback);
     }
@@ -475,8 +502,8 @@ private:
         return {TQueryReplayEvents::UncategorizedPlanMismatch, ""};
     }
 
-    std::pair<TQueryReplayEvents::TCheckQueryPlanStatus, TString> CheckQueryPlan(const NJson::TJsonValue& newEnginePlan) {
-        NJson::TJsonValue oldEnginePlan = ExtractQueryPlan(ReplayDetails["query_plan"].GetStringSafe());
+    std::pair<TQueryReplayEvents::TCheckQueryPlanStatus, TString> CheckQueryPlan(const NJson::TJsonValue& newEnginePlan, const NJson::TJsonValue& oldEnginePlan) {
+        //NJson::TJsonValue oldEnginePlan = ExtractQueryPlan(ReplayDetails["query_plan"].GetStringSafe());
         const auto oldEngineStats = ExtractTableStats(oldEnginePlan);
         const auto newEngineStats = ExtractTableStats(newEnginePlan);
 
@@ -502,7 +529,7 @@ private:
         Reply(status, {issue});
     }
 
-    void Reply(const Ydb::StatusIds::StatusCode& status, const TIssues& issues, const std::optional<TString>& queryPlan = std::nullopt) {
+    void Reply(const Ydb::StatusIds::StatusCode& status, const TIssues& issues, const std::optional<TString>& queryPlan = std::nullopt, const std::optional<TString>& oldQueryPlan = std::nullopt) {
         std::unique_ptr<TQueryReplayEvents::TEvCompileResponse> ev = std::make_unique<TQueryReplayEvents::TEvCompileResponse>(true);
         Y_UNUSED(queryPlan);
         if (status != Ydb::StatusIds::SUCCESS) {
@@ -520,7 +547,7 @@ private:
         } else {
             Y_ENSURE(queryPlan);
             ev->Plan = *queryPlan;
-            std::tie(ev->Status, ev->Message) = CheckQueryPlan(ExtractQueryPlan(*queryPlan));
+            std::tie(ev->Status, ev->Message) = CheckQueryPlan(ExtractQueryPlan(*queryPlan), ExtractQueryPlan(*oldQueryPlan));
         }
 
         Send(Owner, ev.release());
@@ -612,6 +639,9 @@ private:
 	    Config->_KqpYqlSyntaxVersion = syntax;
         Config->FreezeDefaults();
 
+	    ConfigOld->_KqpYqlSyntaxVersion = syntax;
+        ConfigOld->FreezeDefaults();
+
         MetadataLoader = make_shared<TStaticTableMetadataLoader>(TlsActivationContext->ActorSystem(), TableMetadata);
         std::shared_ptr<NYql::IKikimrGateway::IKqpTableMetadataLoader> loader = MetadataLoader;
 
@@ -625,6 +655,8 @@ private:
         auto federatedQuerySetup = std::make_optional<TKqpFederatedQuerySetup>({HttpGateway, nullptr, nullptr, nullptr, {}, {}, {}, nullptr, nullptr, {}});
         KqpHost = CreateKqpHost(Gateway, Query->Cluster, Query->Database, Config, ModuleResolverState->ModuleResolver,
             federatedQuerySetup, nullptr, GUCSettings, Nothing(), FunctionRegistry, false);
+        KqpHostOld = CreateKqpHost(Gateway, Query->Cluster, Query->Database, ConfigOld, ModuleResolverState->ModuleResolver,
+            federatedQuerySetup, nullptr, GUCSettings, Nothing(), FunctionRegistry, false);
 
         StartCompilation();
         Continue();
@@ -634,9 +666,23 @@ private:
     }
 
     void Handle(TEvKqp::TEvContinueProcess::TPtr& ev) {
-        Y_ENSURE(!ev->Get()->QueryId);
+        if (ev->Get()->QueryId == 0) {
+            if (ev->Get()->Finished) {
+                Finished = true;
+            } else {
+                Stopped = true;
+            }
+        }
 
-        if (!ev->Get()->Finished) {
+        if (ev->Get()->QueryId == 1) {
+            if (ev->Get()->Finished) {
+                OldFinished = true;
+            } else {
+                OldStopped = true;
+            }
+        }
+
+        if (!OldFinished || !Finished) {
             Continue();
             return;
         }
@@ -644,13 +690,21 @@ private:
         auto kqpResult = AsyncCompileResult->GetResult();
         auto status = GetYdbStatus(kqpResult);
 
+        auto oldKqpResult = AsyncCompileResultOld->GetResult();
+        auto oldStatus = GetYdbStatus(kqpResult);
+
         std::optional<TString> queryPlan;
+        std::optional<TString> oldQueryPlan;
 
         if (status == Ydb::StatusIds::SUCCESS) {
             queryPlan = std::move(kqpResult.QueryPlan);
         }
 
-        Reply(status, kqpResult.Issues(), queryPlan);
+        if (oldStatus == Ydb::StatusIds::SUCCESS) {
+            queryPlan = std::move(oldKqpResult.QueryPlan);
+        }
+
+        Reply(status, kqpResult.Issues(), queryPlan, oldKqpResult);
     }
 
     void HandleTimeout() {
@@ -664,15 +718,24 @@ private:
     TGUCSettings::TPtr GUCSettings = std::make_shared<TGUCSettings>();
     TKqpSettings KqpSettings;
     TKikimrConfiguration::TPtr Config;
+    TKikimrConfiguration::TPtr ConfigOld;
     TIntrusivePtr<IKqpGateway> Gateway;
     TIntrusivePtr<IKqpHost> KqpHost;
+    TIntrusivePtr<IKqpHost> KqpHostOld;
     TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncCompileResult;
+    TIntrusivePtr<IKqpHost::IAsyncQueryResult> AsyncCompileResultOld;
     const NMiniKQL::IFunctionRegistry* FunctionRegistry;
     std::shared_ptr<TMetadataInfoHolder> TableMetadata;
     TActorId MiniKQLCompileService;
     NJson::TJsonValue ReplayDetails;
     std::shared_ptr<TStaticTableMetadataLoader> MetadataLoader;
     NYql::IHTTPGateway::TPtr HttpGateway;
+
+    bool Stopped = true;
+    bool OldStopped = true;
+
+    bool Finished = false;
+    bool OldFinished = false;
 };
 
 IActor* CreateQueryCompiler(TIntrusivePtr<TModuleResolverState> moduleResolverState,
