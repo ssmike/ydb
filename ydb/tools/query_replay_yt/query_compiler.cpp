@@ -699,10 +699,10 @@ private:
         }
 
         if (oldStatus == Ydb::StatusIds::SUCCESS) {
-            queryPlan = std::move(oldKqpResult.QueryPlan);
+            oldQueryPlan = std::move(oldKqpResult.QueryPlan);
         }
 
-        Reply(status, kqpResult.Issues(), queryPlan, oldKqpResult);
+        Reply(status, kqpResult.Issues(), queryPlan, oldQueryPlan);
     }
 
     void HandleTimeout() {
