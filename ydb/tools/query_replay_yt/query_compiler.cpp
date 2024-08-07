@@ -689,7 +689,7 @@ private:
         auto status = GetYdbStatus(kqpResult);
 
         auto oldKqpResult = AsyncCompileResultOld->GetResult();
-        auto oldStatus = GetYdbStatus(kqpResult);
+        auto oldStatus = GetYdbStatus(oldKqpResult);
 
         std::optional<TString> queryPlan;
         std::optional<TString> oldQueryPlan;
