@@ -321,9 +321,6 @@ message TTableServiceConfig {
     optional TComputeSchedulerSettings ComputeSchedulerSettings = 70;
 
     optional bool EnableRowsDuplicationCheck = 69 [ default = false ];
-<<<<<<< HEAD
-
-<<<<<<< HEAD
     optional bool EnableHtapTx = 71 [default = true];
 
     message TWriteActorSettings {
