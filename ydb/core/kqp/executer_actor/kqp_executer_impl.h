@@ -140,6 +140,7 @@ public:
         , StatementResultIndex(statementResultIndex)
     {
         EnableReadsMerge = *MergeDatashardReadsControl() == 1;
+        Y_VERIFY(EnableReadsMerge);
         TasksGraph.GetMeta().Snapshot = IKqpGateway::TKqpSnapshot(Request.Snapshot.Step, Request.Snapshot.TxId);
         TasksGraph.GetMeta().Arena = MakeIntrusive<NActors::TProtoArenaHolder>();
         TasksGraph.GetMeta().Database = Database;
