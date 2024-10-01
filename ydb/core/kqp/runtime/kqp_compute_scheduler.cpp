@@ -358,7 +358,7 @@ public:
     }
 
     void HandleUpdate(double delta) {
-        Value_ += delta;
+        SetValue(Value_ + delta);
     }
 
 };
@@ -654,6 +654,7 @@ void TComputeScheduler::TImpl::AdvanceTime(TMonotonic now, TSchedulerEntity::TGr
     if (Counters) {
         record->InitCounters(Counters);
     }
+    WeightsUpdater.UpdateAll();
     record->MutableStats.Next()->Capacity = record->Share->GetValue();
     auto& v = record->MutableStats;
     {
@@ -691,7 +692,6 @@ void TComputeScheduler::TImpl::AdvanceTime(TMonotonic now, TSchedulerEntity::TGr
 }
 
 void TComputeScheduler::AdvanceTime(TMonotonic now) {
-    Impl->WeightsUpdater.UpdateAll();
     for (size_t i = 0; i < Impl->Records.size(); ++i) {
         Impl->AdvanceTime(now, Impl->Records[i].get());
     }
