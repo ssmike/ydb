@@ -339,95 +339,134 @@ TSchedulerEntityHandle& TSchedulerEntityHandle::operator = (TSchedulerEntityHand
 
 TSchedulerEntityHandle::~TSchedulerEntityHandle() = default;
 
-class IResourcesWeightLimitValue : public IObservableValue<double> {
+struct TResourceWeightIntrusiveListTag {};
+
+class IResourcesWeightLimitValue : public TParameter<double>, public TIntrusiveListItem<IResourcesWeightLimitValue, TResourceWeightIntrusiveListTag> {
 public:
+    using TParameter<double>::TParameter;
+
     virtual bool Enabled() = 0;
+
+    virtual double Weight() = 0;
+
+    virtual double HardLimit() = 0;
 };
 
 class TResourcesWeightCalculator : public IObservable {
 public:
-    void Register() {
+    TResourcesWeightCalculator(TObservableUpdater* updater, TMaybe<TDuration> throttleRecalculation)
+        : Updater(updater)
+        , ThrottleRecalculation(throttleRecalculation)
+    {
+        Y_UNUSED(Updater);
+        Y_UNUSED(throttleRecalculation);
     }
+
+    void Register(IResourcesWeightLimitValue* entry) {
+        AddDependency(entry);
+        ReportEnabled(entry);
+    }
+
+    void ReportEnabled(IResourcesWeightLimitValue* entry) {
+        entry->TIntrusiveListItem<IResourcesWeightLimitValue, TResourceWeightIntrusiveListTag>::Unlink();
+        if (entry->Enabled()) {
+            Entries.PushFront(entry);
+        } else {
+            Entries.PushBack(entry);
+        }
+    }
+
+    bool Update() {
+        SortBuffer.clear();
+        double sumWeight = 0;
+        for (auto& entry : Entries) {
+            if (!entry.Enabled()) {
+                break;
+            }
+            sumWeight += entry.Weight();
+            SortBuffer.push_back({entry.HardLimit() / entry.Weight(), &entry});
+        }
+        Sort(SortBuffer);
+
+        double level = 0;
+        double consumedShare = 0;
+        for (auto& [entryLimit, sortedEntry] : SortBuffer) {
+            double limit = entryLimit - level;
+            double maxToConsume = (1 - consumedShare) / sumWeight;
+
+            double actual = Min(limit, maxToConsume);
+
+            level += actual;
+            consumedShare += actual * sumWeight;
+
+            if (maxToConsume <= limit) {
+                break;
+            }
+
+            sumWeight -= sortedEntry->Weight();
+        }
+
+        for (auto& [entryLimit, sortedEntry] : SortBuffer) {
+            sortedEntry->SetValue(Min(level * sortedEntry->Weight(), sortedEntry->HardLimit()));
+        }
+
+        // nobody should be subscribed
+        return false;
+    }
+
+private:
+    TIntrusiveList<IResourcesWeightLimitValue, TResourceWeightIntrusiveListTag> Entries;
+    TObservableUpdater* Updater;
+    TMaybe<TDuration> ThrottleRecalculation;
+
+    TVector<std::pair<double, IResourcesWeightLimitValue*>> SortBuffer;
 };
 
 class TResourcesWeightLimitValue : public IResourcesWeightLimitValue {
 public:
     TResourcesWeightLimitValue(
-        IObservable* staticLimit,
+        IObservableValue<double>* staticLimit,
+        TParameter<double>* resourceWeight,
+        TParameter<bool>* enabled,
         TResourcesWeightCalculator* calculator,
-        double initialWeight,
-        bool initialEnabled,
         TObservableUpdater* updater)
-    : ResourceWeightValue(updater, initialWeight)
-    , Enabled_(initialEnabled)
+    : IResourcesWeightLimitValue(updater, staticLimit->GetValue())
+    , StaticLimit(staticLimit)
+    , ResourceWeightValue(resourceWeight)
+    , Enabled_(enabled)
+    , Calculator_(calculator)
     {
+        AddDependency(staticLimit);
+        AddDependency(resourceWeight);
+        calculator->AddDependency(staticLimit);
+        calculator->AddDependency(resourceWeight);
+        calculator->Register(this);
     }
 
-    bool Enabled() {
-        return Enabled_;
+    bool Enabled() override {
+        return Enabled_->GetValue();
+    }
+
+    double Weight() override {
+        return ResourceWeightValue->GetValue();
+    }
+
+    double HardLimit() override {
+        return StaticLimit->GetValue();
+    }
+
+    bool Update() override {
+        Calculator_->ReportEnabled(this);
+        return IResourcesWeightLimitValue::Update();
     }
 
 private:
-    TParameter<double> ResourceWeightValue;
-    bool Enabled_; 
+    IObservableValue<double>* StaticLimit;
+    TParameter<double>* ResourceWeightValue;
+    TParameter<bool>* Enabled_;
+    TResourcesWeightCalculator* Calculator_;
 };
 
-
-class TSumResourceWeightsHolder : public TParameter<double> {
-public:
-    using TParameter<double>::TParameter;
-
-    TSumResourceWeightsHolder(TObservableUpdater* engine)
-        : TParameter(engine, 0)
-    {
-    }
-
-    void HandleUpdate(double delta) {
-        SetValue(Value_ + delta);
-    }
-
-};
-
-class TResourceWeightsUpdater {
-public:
-    TResourceWeightsUpdater(TParameter<double>* param, double initial)
-        : Param(param)
-        , Value_(initial)
-    {
-        param->SetValue(Value_);
-    }
-
-    void Track(TSumResourceWeightsHolder* holder) {
-        if (!Holder) {
-            Holder = holder;
-            Holder->HandleUpdate(GetValue());
-        }
-    }
-
-    void Untrack() {
-        if (Holder) {
-            Holder->HandleUpdate(-GetValue());
-            Holder = nullptr;
-        }
-    }
-
-    double GetValue() {
-        return Value_;
-    }
-
-    void SetValue(double val) {
-        if (Holder) {
-            Holder->HandleUpdate(val - Value_);
-        }
-        Value_ = val;
-        Param->SetValue(Value_);
-    }
-
-private:
-    TSumResourceWeightsHolder* Holder = nullptr;
-    TParameter<double>* Param;
-    double Value_;
-};
 
 class TSchedulerEntity {
 public:
@@ -455,7 +494,7 @@ public:
         std::atomic<i64> DelayedCount = 0;
 
         THolder<IObservableValue<double>> Share;
-        THolder<TResourceWeightsUpdater> ResourceWeightUpdater;
+        THolder<TResourcesWeightLimitValue> ResourcesWeightLimit;
 
         ::NMonitoring::TDynamicCounters::TCounterPtr Vtime;
         ::NMonitoring::TDynamicCounters::TCounterPtr EntitiesWeight;
@@ -580,7 +619,8 @@ struct TComputeScheduler::TImpl {
 
     TObservableUpdater WeightsUpdater;
     TParameter<double> SumCores{&WeightsUpdater, 1};
-    TSumResourceWeightsHolder SumResourceWeights{&WeightsUpdater};
+
+    TResourcesWeightCalculator ResourceWeightsCalculator{&WeightsUpdater, {}};
 
     enum : ui32 {
         TotalShare = 1,
@@ -839,12 +879,9 @@ void TComputeScheduler::UpdateGroupShare(TString group, double share, TMonotonic
 
     if (!ptr) {
         auto compositeWeight = MakeHolder<TCompositeGroupShare>(resourceWeightValue, weightEnabled, &Impl->SumResourceWeights, shareValue);
-        auto resourceWeightsUpdater = MakeHolder<TResourceWeightsUpdater>(resourceWeightValue, resourceWeight.value_or(0));
         auto cap = MakeHolder<TShare>(&Impl->SumCores, compositeWeight.Get());
         Impl->WeightsUpdater.AddValue({group, TImpl::CompositeShare}, std::move(compositeWeight));
         Impl->CreateGroup(std::move(cap), now, group);
-
-        Impl->Records.back()->ResourceWeightUpdater = std::move(resourceWeightsUpdater);
     } else {
         auto& record = Impl->Records[*ptr];
         record->MutableStats.Next()->Disabled = false;
