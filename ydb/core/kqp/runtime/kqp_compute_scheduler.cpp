@@ -23,7 +23,7 @@ namespace {
 namespace NKikimr {
 namespace NKqp {
 
-class IObservable : TNonCopyable {
+class IObservable : TNonCopyable, public TIntrusiveListItem<IObservable> {
 public:
     virtual bool Update() = 0;
 
@@ -55,16 +55,6 @@ public:
         for (auto* dep : Dependents) {
             f(dep);
         }
-    }
-
-protected:
-    TSet<IObservable*> CutAllDependents() {
-        TSet<IObservable*> res;
-        Dependents.swap(res);
-        for (auto* dep : res) {
-            dep->Dependencies.erase(this);
-        }
-        return res;
     }
 
 private:
@@ -130,11 +120,11 @@ private:
 public:
     void UpdateAll() {
         TVector<TSet<IObservable*>> queue;
-        auto deps = CutAllDependents();
-        for (auto* dep : deps) {
-            queue.resize(Max(queue.size(), dep->GetDepth() + 1));
-            queue[dep->GetDepth()].insert(dep);
+        for (auto& dep : ToUpdate_) {
+            queue.resize(Max(queue.size(), dep.GetDepth() + 1));
+            queue[dep.GetDepth()].insert(&dep);
         }
+        ToUpdate_.Clear();
 
         for (size_t i = 0; i < queue.size(); ++i) {
             TSet<IObservable*> cur;
@@ -152,7 +142,7 @@ public:
     }
 
     void ToUpdate(IObservable* dep) {
-        dep->AddDependency(this);
+        ToUpdate_.PushBack(dep);
     }
 
     using TParameterKey = std::pair<TString, ui32>;
@@ -211,6 +201,7 @@ private:
     };
 
     THashMap<TParameterKey, TValueContainer> Params;
+    TIntrusiveList<IObservable> ToUpdate_;
 };
 
 template<typename T>
@@ -347,6 +338,40 @@ TSchedulerEntityHandle& TSchedulerEntityHandle::operator = (TSchedulerEntityHand
 }
 
 TSchedulerEntityHandle::~TSchedulerEntityHandle() = default;
+
+class IResourcesWeightLimitValue : public IObservableValue<double> {
+public:
+    virtual bool Enabled() = 0;
+};
+
+class TResourcesWeightCalculator : public IObservable {
+public:
+    void Register() {
+    }
+};
+
+class TResourcesWeightLimitValue : public IResourcesWeightLimitValue {
+public:
+    TResourcesWeightLimitValue(
+        IObservable* staticLimit,
+        TResourcesWeightCalculator* calculator,
+        double initialWeight,
+        bool initialEnabled,
+        TObservableUpdater* updater)
+    : ResourceWeightValue(updater, initialWeight)
+    , Enabled_(initialEnabled)
+    {
+    }
+
+    bool Enabled() {
+        return Enabled_;
+    }
+
+private:
+    TParameter<double> ResourceWeightValue;
+    bool Enabled_; 
+};
+
 
 class TSumResourceWeightsHolder : public TParameter<double> {
 public:
