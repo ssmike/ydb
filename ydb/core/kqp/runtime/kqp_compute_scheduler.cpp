@@ -108,6 +108,27 @@ private:
     IObservableValue* Share;
 };
 
+class TRatio : public IObservableValue<double> {
+protected:
+    double DoUpdateValue() override {
+        return Part->GetValue() / Base->GetValue();
+    }
+
+public:
+    TRatio(IObservableValue* base, IObservableValue* part)
+        : Base(base)
+        , Part(part)
+    {
+        AddDependency(base);
+        AddDependency(part);
+        Update();
+    }
+
+private:
+    IObservableValue* Base;
+    IObservableValue* Part;
+};
+
 template<typename T>
 class TParameter;
 
@@ -183,6 +204,7 @@ private:
     struct TValueContainer {
         TParameter<double>* AsDoubleParameter = nullptr;
         TParameter<bool>* AsBoolParameter = nullptr;
+        TParameter<ui64>* AsUintParameter = nullptr;
 
         THolder<IObservable> Holder;
 
@@ -195,6 +217,7 @@ private:
 
         TValueContainer(THolder<TParameter<double>> value);
         TValueContainer(THolder<TParameter<bool>> value);
+        TValueContainer(THolder<TParameter<ui64>> value);
 
         template<typename T>
         T* Get();
@@ -219,6 +242,12 @@ public:
         Value_ = val;
         Updater_->ToUpdate(this);
         return oldValue;
+    }
+
+
+    void Add(T val) {
+        Value_ += val;
+        Updater_->ToUpdate(this);
     }
 
 protected:
@@ -253,12 +282,19 @@ TObservableUpdater::TValueContainer::TValueContainer(THolder<TParameter<bool>> v
     Holder = THolder<IObservable>(value.Release());
 }
 
+TObservableUpdater::TValueContainer::TValueContainer(THolder<TParameter<ui64>> value) {
+    AsUintParameter = value.Get();
+    Holder = THolder<IObservable>(value.Release());
+}
+
 template<typename T>
 T* TObservableUpdater::TValueContainer::Get() {
     if constexpr (std::is_same_v<T, TParameter<double>>) {
         return AsDoubleParameter;
     } else if constexpr (std::is_same_v<T, TParameter<bool>>) {
         return AsBoolParameter;
+    } else if constexpr (std::is_same_v<T, TParameter<ui64>>) {
+        return AsUintParameter;
     } else {
         return Holder.Get();
     }
@@ -425,6 +461,8 @@ private:
 class TResourcesWeightLimitValue : public IResourcesWeightLimitValue {
 public:
     TResourcesWeightLimitValue(
+        TParameter<double>* sumCores,
+        TParameter<ui64>* tasksCount,
         IObservableValue<double>* staticLimit,
         TParameter<double>* resourceWeight,
         TParameter<bool>* enabled,
@@ -435,16 +473,20 @@ public:
     , ResourceWeightValue(resourceWeight)
     , Enabled_(enabled)
     , Calculator_(calculator)
+    , Taskscount(tasksCount)
+    , SumCores(sumCores)
     {
+        AddDependency(sumCores);
+        AddDependency(Taskscount);
         AddDependency(staticLimit);
         AddDependency(resourceWeight);
-        calculator->AddDependency(staticLimit);
-        calculator->AddDependency(resourceWeight);
+        AddDependency(enabled);
+
         calculator->Register(this);
     }
 
     bool Enabled() override {
-        return Enabled_->GetValue();
+        return Enabled_->GetValue() && Taskscount->GetValue() > 0;
     }
 
     double Weight() override {
@@ -452,7 +494,7 @@ public:
     }
 
     double HardLimit() override {
-        return StaticLimit->GetValue();
+        return Min(StaticLimit->GetValue(), Taskscount->GetValue() / SumCores->GetValue());
     }
 
     bool Update() override {
@@ -465,6 +507,8 @@ private:
     TParameter<double>* ResourceWeightValue;
     TParameter<bool>* Enabled_;
     TResourcesWeightCalculator* Calculator_;
+    TParameter<ui64>* Taskscount;
+    TParameter<double>* SumCores;
 };
 
 
@@ -629,8 +673,9 @@ struct TComputeScheduler::TImpl {
 
         ResourceWeight = 3,
         ResourceWeightEnabled = 4,
+        TasksCount = 5,
 
-        CompositeShare = 5,
+        CompositeShare = 6,
     };
 
     TIntrusivePtr<TKqpCounters> Counters;
@@ -639,9 +684,10 @@ struct TComputeScheduler::TImpl {
 
     TDuration MaxDelay = TDuration::Seconds(10);
 
-    void CreateGroup(THolder<IObservableValue<double>> share, NMonotonic::TMonotonic now, std::optional<TString> groupName = std::nullopt) {
+    void CreateGroup(THolder<IObservableValue<double>> share, NMonotonic::TMonotonic now, std::optional<TString> groupName = std::nullopt, THolder<TResourcesWeightLimitValue> resourceWeightLimit = {}) {
         auto group = std::make_unique<TSchedulerEntity::TGroupRecord>();
         group->Share = std::move(share);
+        group->ResourcesWeightLimit = std::move(resourceWeightLimit);
         if (groupName) {
             group->Name = *groupName;
             GroupId[*groupName] = Records.size();
@@ -697,8 +743,9 @@ void TComputeScheduler::AddToGroup(TMonotonic now, ui64 id, TSchedulerEntityHand
     auto group = Impl->Records[id].get();
     (*handle).Groups.push_back(group);
     group->MutableStats.Next()->EntitiesWeight += (*handle).Weight;
-    if ((*handle).Weight > 0 && group->ResourceWeightUpdater) {
-        group->ResourceWeightUpdater->Track(&Impl->SumResourceWeights);
+    TParameter<ui64>* tasksCount = nullptr; Impl->WeightsUpdater.FindOrAddParameter<ui64>({group, TImpl::TasksCount}, 0ul);
+    if ((*handle).Weight > 0) {
+        tasksCount->Add(1);
     }
     Impl->AdvanceTime(now, group);
 }
@@ -771,6 +818,7 @@ void TComputeScheduler::Deregister(TSchedulerEntityHandle& self, TMonotonic now)
     for (auto group : (*self).Groups) {
         auto* next = group->MutableStats.Next();
         next->EntitiesWeight -= (*self).Weight;
+        auto* param = Impl->WeightsUpdater.<ui64>({group, TImpl::TasksCount}, 0)
         if (next->EntitiesWeight <= 0) {
             group->ResourceWeightUpdater->Untrack();
         }
@@ -843,27 +891,28 @@ class TCompositeGroupShare : public IObservableValue<double> {
 protected:
     double DoUpdateValue() override {
         if (ResourceWeightEnabled->GetValue()) {
-            return Min(TotalLimit->GetValue(), ResourceWeight->GetValue() / SumResourceWeights->GetValue());
+            return Min(TotalLimit->GetValue(), ResourceWeightLimit->GetValue());
         } else {
             return TotalLimit->GetValue();
         }
     }
 
 public:
-    TCompositeGroupShare(IObservableValue<double>* resourceWeight, IObservableValue<bool>* resourceWeightEnabled, IObservableValue<double>* sumResourceWeights, IObservableValue<double>* totalLimit)
-        : ResourceWeight(resourceWeight)
-        , ResourceWeightEnabled(resourceWeightEnabled)
-        , SumResourceWeights(sumResourceWeights)
+    TCompositeGroupShare(IObservableValue<double>* totalLimit, TResourcesWeightLimitValue* resourceWeightLimit, IObservableValue<bool>* resourceWeightEnabled)
+        : ResourceWeightEnabled(resourceWeightEnabled)
         , TotalLimit(totalLimit)
+        , ResourceWeightLimit(resourceWeightLimit)
     {
+        AddDependency(resourceWeightEnabled);
+        AddDependency(totalLimit);
+        AddDependency(resourceWeightLimit);
         Update();
     }
 
 private:
-    IObservableValue<double>* ResourceWeight;
     IObservableValue<bool>* ResourceWeightEnabled;
-    IObservableValue<double>* SumResourceWeights;
     IObservableValue<double>* TotalLimit;
+    TResourcesWeightLimitValue* ResourceWeightLimit;
 };
 
 void TComputeScheduler::UpdateGroupShare(TString group, double share, TMonotonic now, std::optional<double> resourceWeight) {
@@ -877,8 +926,19 @@ void TComputeScheduler::UpdateGroupShare(TString group, double share, TMonotonic
 
     TParameter<double>* resourceWeightValue = Impl->WeightsUpdater.FindOrAddParameter<double>({group, TImpl::ResourceWeight}, resourceWeight.value_or(0));
 
+    TParameter<ui64>* taskscount = Impl->WeightsUpdater.FindOrAddParameter<ui64>({group, TImpl::TasksCount}, 0);
+
     if (!ptr) {
-        auto compositeWeight = MakeHolder<TCompositeGroupShare>(resourceWeightValue, weightEnabled, &Impl->SumResourceWeights, shareValue);
+        auto resourceLimitValue = MakeHolder<TResourcesWeightLimitValue>(
+            &Impl->SumCores,
+            taskscount,
+            shareValue,
+            resourceWeightValue,
+            weightEnabled,
+            &Impl->ResourceWeightsCalculator,
+            &Impl->WeightsUpdater);
+
+        auto compositeWeight = MakeHolder<TCompositeGroupShare>(shareValue, weightEnabled, resourceLimitValue);
         auto cap = MakeHolder<TShare>(&Impl->SumCores, compositeWeight.Get());
         Impl->WeightsUpdater.AddValue({group, TImpl::CompositeShare}, std::move(compositeWeight));
         Impl->CreateGroup(std::move(cap), now, group);
