@@ -810,8 +810,10 @@ void TComputeScheduler::Deregister(TSchedulerEntityHandle& self, TMonotonic now)
     for (auto group : (*self).Groups) {
         auto* next = group->MutableStats.Next();
         next->EntitiesWeight -= (*self).Weight;
-        auto* param = Impl->WeightsUpdater.FindOrAddParameter<i64>({group->Name, TImpl::TasksCount}, 0);
-        param->Add(-1);
+        auto* param = Impl->WeightsUpdater.FindValue<TParameter<i64>>({group->Name, TImpl::TasksCount});
+        if (param) {
+            param->Add(-1);
+        }
         Impl->AdvanceTime(now, group);
     }
 }
