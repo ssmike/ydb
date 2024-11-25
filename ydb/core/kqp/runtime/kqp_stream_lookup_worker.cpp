@@ -308,17 +308,27 @@ public:
         readRequests.reserve(rangesPerShard.size() + pointsPerShard.size());
 
         for (auto& [shardId, points] : pointsPerShard) {
-            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
-            FillReadRequest(++readId, request, points);
-            readRequests.emplace_back(shardId, std::move(request));
-            PendingKeysByReadId.insert({readId, std::move(points)});
+            for (auto point : points) {
+                THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+
+                std::vector<TOwnedTableRange> assigned;
+                assigned.push_back(point);
+                FillReadRequest(++readId, request, assigned);
+                readRequests.emplace_back(shardId, std::move(request));
+                PendingKeysByReadId.insert({readId, std::move(assigned)});
+            }
         }
 
         for (auto& [shardId, ranges] : rangesPerShard) {
-            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
-            FillReadRequest(++readId, request, ranges);
-            readRequests.emplace_back(shardId, std::move(request));
-            PendingKeysByReadId.insert({readId, std::move(ranges)});
+            for (auto range: ranges) {
+                THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+
+                std::vector<TOwnedTableRange> assigned;
+                assigned.push_back(range);
+                FillReadRequest(++readId, request, assigned);
+                readRequests.emplace_back(shardId, std::move(request));
+                PendingKeysByReadId.insert({readId, std::move(assigned)});
+            }
         }
 
         return readRequests;
