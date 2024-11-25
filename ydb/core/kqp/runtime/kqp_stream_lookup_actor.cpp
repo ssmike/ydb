@@ -278,7 +278,7 @@ private:
     void Handle(TEvDataShard::TEvReadResult::TPtr& ev) {
         const auto& record = ev->Get()->Record;
 
-        if (Delayed.contains(std::make_pair(record.GetReadId(), record.GetSeqNo()))) {
+        if (!Delayed.contains(std::make_pair(record.GetReadId(), record.GetSeqNo()))) {
             Schedule(TDuration::Seconds(1) * (10 - Delayed.size()), ev->Release().Release());
 
             Delayed.insert(std::make_pair(record.GetReadId(), record.GetSeqNo()));
