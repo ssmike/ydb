@@ -963,7 +963,7 @@ void TComputeScheduler::UpdateGroupShare(TString group, double share, TMonotonic
 
         auto compositeWeight = MakeHolder<TCompositeGroupShare>(shareValue, resourceLimitValue.Get(), weightEnabled);
         auto cap = MakeHolder<TShare>(&Impl->SumCores, compositeWeight.Get());
-        Impl->WeightsUpdater.AddValue({group, TImpl::ResourceLimitValue}, std::move(resourceLimitValue));
+        Impl->WeightsUpdater.AddValue<IObservable>({group, TImpl::ResourceLimitValue}, THolder(resourceLimitValue.Release()));
         Impl->WeightsUpdater.AddValue({group, TImpl::CompositeShare}, std::move(compositeWeight));
         Impl->CreateGroup(std::move(cap), now, group);
     } else {
