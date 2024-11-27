@@ -911,7 +911,11 @@ class TCompositeGroupShare : public IObservableValue<double> {
 protected:
     double DoUpdateValue() override {
         if (ResourceWeightEnabled->GetValue()) {
-            return Min(TotalLimit->GetValue(), ResourceWeightLimit->GetValue());
+            if (ResourceWeightLimit->Enabled()->GetValue()) {
+                return Min(TotalLimit->GetValue(), ResourceWeightLimit->GetValue());
+            } else {
+                return 0;
+            }
         } else {
             return TotalLimit->GetValue();
         }
@@ -926,6 +930,7 @@ public:
         AddDependency(resourceWeightEnabled);
         AddDependency(totalLimit);
         AddDependency(resourceWeightLimit);
+        AddDependency(resourceWeightLimit->Enabled());
         Update();
     }
 
