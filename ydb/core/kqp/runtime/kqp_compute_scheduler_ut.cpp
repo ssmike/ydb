@@ -72,5 +72,48 @@ Y_UNIT_TEST_SUITE(TComputeScheduler) {
     }
 
     Y_UNIT_TEST(ResourceWeight) {
+        TComputeScheduler scheduler;
+        scheduler.UpdateGroupShare("first", 1, TMonotonic::Zero(), 1);
+        scheduler.UpdateGroupShare("second", 1, TMonotonic::Zero(), 3);
+        scheduler.SetMaxDeviation(TDuration::MilliSeconds(1));
+        scheduler.SetCapacity(1);
+        TVector<TSchedulerEntityHandle> handles;
+        handles.push_back(scheduler.Enroll("first", 1, TMonotonic::Zero()));
+        handles.push_back(scheduler.Enroll("second", 1, TMonotonic::Zero()));
+        scheduler.AdvanceTime(TMonotonic::Zero());
+        auto times = RunSimulation(scheduler,
+            handles,
+            TMonotonic::Zero() + TDuration::MilliSeconds(10),
+            TDuration::MilliSeconds(1),
+            TDuration::Seconds(2),
+            TDuration::MilliSeconds(10));
+
+        Cerr << times[0].MilliSeconds() << " " << (TDuration::Seconds(2) /4).MilliSeconds() << Endl;
+        UNIT_ASSERT_LE(times[0], TDuration::Seconds(2) /4 + TDuration::MilliSeconds(10));
+        UNIT_ASSERT_GE(times[0], TDuration::Seconds(2) /4 - TDuration::MilliSeconds(10));
+
+        Cerr << times[1].MilliSeconds() << " " << (TDuration::Seconds(2)*3 /4).MilliSeconds() << Endl;
+        UNIT_ASSERT_LE(times[1], TDuration::Seconds(2)*3 /4 + TDuration::MilliSeconds(10));
+        UNIT_ASSERT_GE(times[1], TDuration::Seconds(2)*3 /4 - TDuration::MilliSeconds(10));
+
+        scheduler.Deregister(handles[1], TMonotonic::Zero() + TDuration::Seconds(2));
+        handles.pop_back();
+
+        scheduler.UpdateGroupShare("third", 0.5, TMonotonic::Zero(), 2);
+        handles.push_back(scheduler.Enroll("third", 1, TMonotonic::Zero() + TDuration::Seconds(2)));
+        times = RunSimulation(scheduler,
+            handles,
+            TMonotonic::Zero() + TDuration::Seconds(2),
+            TDuration::MilliSeconds(1),
+            TDuration::Seconds(2),
+            TDuration::MilliSeconds(10));
+
+        Cerr << times[0].MilliSeconds() << " " << (TDuration::Seconds(2) /2).MilliSeconds() << Endl;
+        UNIT_ASSERT_LE(times[0], TDuration::Seconds(2) /2 + TDuration::MilliSeconds(10));
+        UNIT_ASSERT_GE(times[0], TDuration::Seconds(2) /2 - TDuration::MilliSeconds(10));
+
+        Cerr << times[1].MilliSeconds() << " " << (TDuration::Seconds(2) /2).MilliSeconds() << Endl;
+        UNIT_ASSERT_LE(times[1], TDuration::Seconds(2) /2 + TDuration::MilliSeconds(10));
+        UNIT_ASSERT_GE(times[1], TDuration::Seconds(2) /2 - TDuration::MilliSeconds(10));
     }
 }
