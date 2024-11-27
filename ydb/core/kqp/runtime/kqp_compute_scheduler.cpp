@@ -69,7 +69,7 @@ private:
 template<typename T>
 class IObservableValue : public IObservable {
 protected:
-    virtual double DoUpdateValue() = 0;
+    virtual T DoUpdateValue() = 0;
 
 public:
     bool Update() override {
@@ -253,7 +253,7 @@ public:
     }
 
 protected:
-    double DoUpdateValue() override {
+    T DoUpdateValue() override {
         return Value_;
     }
 
@@ -383,23 +383,25 @@ class IResourcesWeightLimitValue : public TParameter<double>, public TIntrusiveL
 public:
     using TParameter<double>::TParameter;
 
-    virtual bool Enabled() = 0;
+    virtual IObservableValue<bool>* Enabled() = 0;
 
-    virtual double Weight() = 0;
+    virtual IObservableValue<double>* Weight() = 0;
 
-    virtual double HardLimit() = 0;
+    virtual IObservableValue<double>* HardLimit() = 0;
 };
 
 class TResourcesWeightCalculator : public IObservable {
 public:
     void Register(IResourcesWeightLimitValue* entry) {
-        AddDependency(entry);
+        AddDependency(entry->Enabled());
+        AddDependency(entry->Weight());
+        AddDependency(entry->HardLimit());
         ReportEnabled(entry);
     }
 
     void ReportEnabled(IResourcesWeightLimitValue* entry) {
         entry->TIntrusiveListItem<IResourcesWeightLimitValue, TResourceWeightIntrusiveListTag>::Unlink();
-        if (entry->Enabled()) {
+        if (entry->Enabled()->GetValue()) {
             Entries.PushFront(entry);
         } else {
             Entries.PushBack(entry);
@@ -410,11 +412,11 @@ public:
         SortBuffer.clear();
         double sumWeight = 0;
         for (auto& entry : Entries) {
-            if (!entry.Enabled()) {
+            if (!entry.Enabled()->GetValue()) {
                 break;
             }
-            sumWeight += entry.Weight();
-            SortBuffer.push_back({entry.HardLimit() / entry.Weight(), &entry});
+            sumWeight += entry.Weight()->GetValue();
+            SortBuffer.push_back({entry.HardLimit()->GetValue() / entry.Weight()->GetValue(), &entry});
         }
         Sort(SortBuffer);
 
@@ -433,11 +435,11 @@ public:
                 break;
             }
 
-            sumWeight -= sortedEntry->Weight();
+            sumWeight -= sortedEntry->Weight()->GetValue();
         }
 
         for (auto& [entryLimit, sortedEntry] : SortBuffer) {
-            sortedEntry->SetValue(Min(level * sortedEntry->Weight(), sortedEntry->HardLimit()));
+            sortedEntry->SetValue(Min(level * sortedEntry->Weight()->GetValue(), sortedEntry->HardLimit()->GetValue()));
         }
 
         // nobody should be subscribed
@@ -461,32 +463,24 @@ public:
         TResourcesWeightCalculator* calculator,
         TObservableUpdater* updater)
     : IResourcesWeightLimitValue(updater, staticLimit->GetValue())
-    , StaticLimit(staticLimit)
+    , EnabledFlag(enabled, tasksCount)
+    , HardLimitValue(staticLimit, tasksCount, sumCores)
     , ResourceWeightValue(resourceWeight)
-    , Enabled_(enabled)
     , Calculator_(calculator)
-    , Taskscount(tasksCount)
-    , SumCores(sumCores)
     {
-        AddDependency(sumCores);
-        AddDependency(Taskscount);
-        AddDependency(staticLimit);
-        AddDependency(resourceWeight);
-        AddDependency(enabled);
-
         calculator->Register(this);
     }
 
-    bool Enabled() override {
-        return Enabled_->GetValue() && Taskscount->GetValue() > 0;
+    IObservableValue<double>* Weight() override {
+        return ResourceWeightValue;
     }
 
-    double Weight() override {
-        return ResourceWeightValue->GetValue();
+    IObservableValue<bool>* Enabled() override {
+        return &EnabledFlag;
     }
 
-    double HardLimit() override {
-        return Min(StaticLimit->GetValue(), Taskscount->GetValue() / SumCores->GetValue());
+    IObservableValue<double>* HardLimit() override {
+        return &HardLimitValue;
     }
 
     bool Update() override {
@@ -495,12 +489,46 @@ public:
     }
 
 private:
-    IObservableValue<double>* StaticLimit;
+    struct TEnabledFlag : public IObservableValue<bool> {
+        TEnabledFlag(TParameter<bool>* enabled, TParameter<i64>* taskscount)
+            : Enabled_(enabled)
+            , Taskscount(taskscount)
+        {
+            AddDependency(enabled);
+            AddDependency(taskscount);
+        }
+
+        bool DoUpdateValue() override {
+            return Enabled_->GetValue() && Taskscount->GetValue() > 0;
+        }
+
+        TParameter<bool>* Enabled_;
+        TParameter<i64>* Taskscount;
+    } EnabledFlag;
+
+    struct THardLimit : public IObservableValue<double> {
+        THardLimit(IObservableValue<double>* staticLimit, TParameter<i64>* taskscount, TParameter<double>* sumCores)
+            : StaticLimit(staticLimit)
+            , TasksCount(taskscount)
+            , SumCores(sumCores)
+        {
+            AddDependency(StaticLimit);
+            AddDependency(TasksCount);
+            AddDependency(SumCores);
+        }
+
+        double DoUpdateValue() override {
+            return Min(StaticLimit->GetValue(), TasksCount->GetValue() / SumCores->GetValue());
+        }
+
+        IObservableValue<double>* StaticLimit;
+        TParameter<i64>* TasksCount;
+        TParameter<double>* SumCores;
+    } HardLimitValue;
+
+private:
     TParameter<double>* ResourceWeightValue;
-    TParameter<bool>* Enabled_;
     TResourcesWeightCalculator* Calculator_;
-    TParameter<i64>* Taskscount;
-    TParameter<double>* SumCores;
 };
 
 
