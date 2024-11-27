@@ -46,6 +46,25 @@ Y_UNIT_TEST_SUITE(TComputeScheduler) {
     }
 
     Y_UNIT_TEST(QueryLimits) {
+        TComputeScheduler scheduler;
+        scheduler.UpdateGroupShare("first", 0.4, TMonotonic::Zero(), std::nullopt);
+        scheduler.SetMaxDeviation(TDuration::MilliSeconds(1));
+        scheduler.UpdatePerQueryShare("first", 0.5, TMonotonic::Zero());
+        scheduler.SetCapacity(2);
+        TVector<TSchedulerEntityHandle> handles;
+        handles.push_back(scheduler.Enroll("first", 1, TMonotonic::Zero()));
+        handles.push_back(scheduler.Enroll("first", 1, TMonotonic::Zero()));
+        auto times = RunSimulation(scheduler,
+            handles,
+            TMonotonic::Zero() + TDuration::MilliSeconds(10),
+            TDuration::MilliSeconds(1),
+            TDuration::Seconds(2),
+            TDuration::MilliSeconds(10));
+        for (auto& time : times) {
+            Cerr << time.MilliSeconds() << " " << (TDuration::Seconds(2) * 0.4).MilliSeconds() << Endl;
+            UNIT_ASSERT_LE(time, TDuration::Seconds(2) * 0.4 + TDuration::MilliSeconds(10));
+            UNIT_ASSERT_GE(time, TDuration::Seconds(2) * 0.4 - TDuration::MilliSeconds(10));
+        }
     }
 
     Y_UNIT_TEST(ResourceWeight) {
