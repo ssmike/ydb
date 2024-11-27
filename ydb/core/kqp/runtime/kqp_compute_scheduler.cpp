@@ -557,7 +557,6 @@ public:
         std::atomic<i64> DelayedCount = 0;
 
         THolder<IObservableValue<double>> Share;
-        THolder<TResourcesWeightLimitValue> ResourcesWeightLimit;
 
         ::NMonitoring::TDynamicCounters::TCounterPtr Vtime;
         ::NMonitoring::TDynamicCounters::TCounterPtr EntitiesWeight;
@@ -698,6 +697,7 @@ struct TComputeScheduler::TImpl {
         TasksCount = 5,
 
         CompositeShare = 6,
+        ResourceLimitValue = 7,
     };
 
     TIntrusivePtr<TKqpCounters> Counters;
@@ -706,10 +706,9 @@ struct TComputeScheduler::TImpl {
 
     TDuration MaxDelay = TDuration::Seconds(10);
 
-    void CreateGroup(THolder<IObservableValue<double>> share, NMonotonic::TMonotonic now, std::optional<TString> groupName = std::nullopt, THolder<TResourcesWeightLimitValue> resourceWeightLimit = {}) {
+    void CreateGroup(THolder<IObservableValue<double>> share, NMonotonic::TMonotonic now, std::optional<TString> groupName = std::nullopt) {
         auto group = std::make_unique<TSchedulerEntity::TGroupRecord>();
         group->Share = std::move(share);
-        group->ResourcesWeightLimit = std::move(resourceWeightLimit);
         if (groupName) {
             group->Name = *groupName;
             GroupId[*groupName] = Records.size();
@@ -964,8 +963,9 @@ void TComputeScheduler::UpdateGroupShare(TString group, double share, TMonotonic
 
         auto compositeWeight = MakeHolder<TCompositeGroupShare>(shareValue, resourceLimitValue.Get(), weightEnabled);
         auto cap = MakeHolder<TShare>(&Impl->SumCores, compositeWeight.Get());
+        Impl->WeightsUpdater.AddValue({group, TImpl::ResourceLimitValue}, std::move(resourceLimitValue));
         Impl->WeightsUpdater.AddValue({group, TImpl::CompositeShare}, std::move(compositeWeight));
-        Impl->CreateGroup(std::move(cap), now, group, std::move(resourceLimitValue));
+        Impl->CreateGroup(std::move(cap), now, group);
     } else {
         auto& record = Impl->Records[*ptr];
         record->MutableStats.Next()->Disabled = false;
