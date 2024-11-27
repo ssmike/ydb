@@ -54,6 +54,10 @@ Y_UNIT_TEST_SUITE(TComputeScheduler) {
         TVector<TSchedulerEntityHandle> handles;
         handles.push_back(scheduler.Enroll("first", 1, TMonotonic::Zero()));
         handles.push_back(scheduler.Enroll("first", 1, TMonotonic::Zero()));
+        for (auto& handle : handles) {
+            auto group = scheduler.MakePerQueryGroup(TMonotonic::Zero(), 0.5, "first");
+            scheduler.AddToGroup(TMonotonic::Zero(), group, handle);
+        }
         auto times = RunSimulation(scheduler,
             handles,
             TMonotonic::Zero() + TDuration::MilliSeconds(10),
