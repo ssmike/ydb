@@ -14,6 +14,7 @@ Y_UNIT_TEST_SUITE(TComputeScheduler) {
                 auto& handle = handles[i];
                 if (!handle.Delay(now)) {
                     handle.TrackTime(batch, now);
+                    results[i] += batch;
                 }
             }
             scheduler.AdvanceTime(now);
