@@ -391,6 +391,7 @@ public:
         AddDependency(entry->Enabled());
         AddDependency(entry->Weight());
         AddDependency(entry->HardLimit());
+        AddDependency(entry);
         ReportEnabled(entry);
     }
 
@@ -465,6 +466,7 @@ public:
     , Updater_(updater)
     {
         calculator->Register(this);
+        AddDependency(&EnabledFlag);
     }
 
     ~TResourcesWeightLimitValue() {
