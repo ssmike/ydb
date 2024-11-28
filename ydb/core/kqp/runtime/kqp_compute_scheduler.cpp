@@ -73,7 +73,8 @@ protected:
 
 public:
     bool Update() override {
-        if (auto val = DoUpdateValue()) {
+        auto val = DoUpdateValue();
+        if (val != Value) {
             Value = val;
             return true;
         } else {
@@ -391,28 +392,16 @@ public:
         AddDependency(entry->Enabled());
         AddDependency(entry->Weight());
         AddDependency(entry->HardLimit());
-        AddDependency(entry);
-        ReportEnabled(entry);
-    }
-
-    void ReportEnabled(IResourcesWeightLimitValue* entry) {
-        entry->TIntrusiveListItem<IResourcesWeightLimitValue, TResourceWeightIntrusiveListTag>::Unlink();
-        if (entry->Enabled()->GetValue()) {
-            Entries.PushFront(entry);
-        } else {
-            Entries.PushBack(entry);
-        }
     }
 
     bool Update() {
         SortBuffer.clear();
         double sumWeight = 0;
         for (auto& entry : Entries) {
-            if (!entry.Enabled()->GetValue()) {
-                break;
+            if (entry.Enabled()->GetValue()) {
+                sumWeight += entry.Weight()->GetValue();
+                SortBuffer.push_back({entry.HardLimit()->GetValue() / entry.Weight()->GetValue(), &entry});
             }
-            sumWeight += entry.Weight()->GetValue();
-            SortBuffer.push_back({entry.HardLimit()->GetValue() / entry.Weight()->GetValue(), &entry});
         }
         Sort(SortBuffer);
 
@@ -438,8 +427,7 @@ public:
             sortedEntry->SetValue(Min(level * sortedEntry->Weight()->GetValue(), sortedEntry->HardLimit()->GetValue()));
         }
 
-        // nobody should be subscribed
-        return false;
+        return true;
     }
 
 private:
@@ -466,7 +454,7 @@ public:
     , Updater_(updater)
     {
         calculator->Register(this);
-        AddDependency(&EnabledFlag);
+        AddDependency(calculator);
     }
 
     ~TResourcesWeightLimitValue() {
@@ -485,11 +473,6 @@ public:
         return &HardLimitValue;
     }
 
-    bool Update() override {
-        Calculator_->ReportEnabled(this);
-        return IResourcesWeightLimitValue::Update();
-    }
-
 private:
     struct TEnabledFlag : public IObservableValue<bool> {
         TEnabledFlag(TParameter<bool>* enabled, TParameter<i64>* taskscount)
@@ -498,9 +481,12 @@ private:
         {
             AddDependency(enabled);
             AddDependency(taskscount);
+            Update();
         }
 
         bool DoUpdateValue() override {
+            Cerr << "enabled flag " << (Enabled_->GetValue() && Taskscount->GetValue() > 0) << " tasks " << Taskscount->GetValue() << " self " << reinterpret_cast<ui64>(this)
+                << " taskscount " << reinterpret_cast<ui64>(Taskscount) << Endl;
             return Enabled_->GetValue() && Taskscount->GetValue() > 0;
         }
 
@@ -768,6 +754,7 @@ void TComputeScheduler::AddToGroup(TMonotonic now, ui64 id, TSchedulerEntityHand
     group->MutableStats.Next()->EntitiesWeight += (*handle).Weight;
     auto* tasksCount = Impl->WeightsUpdater.FindOrAddParameter<i64>({group->Name, TImpl::TasksCount}, 0);
     if ((*handle).Weight > 0) {
+        Cerr << " adding to " << reinterpret_cast<ui64>(tasksCount) << Endl;
         tasksCount->Add(1);
     }
     Impl->AdvanceTime(now, group);
@@ -841,6 +828,7 @@ void TComputeScheduler::Deregister(TSchedulerEntityHandle& self, TMonotonic now)
         next->EntitiesWeight -= (*self).Weight;
         auto* param = Impl->WeightsUpdater.FindValue<TParameter<i64>>({group->Name, TImpl::TasksCount});
         if (param) {
+            Cerr << " remove from group " << reinterpret_cast<size_t>(param) << Endl;
             param->Add(-1);
         }
         Impl->AdvanceTime(now, group);
