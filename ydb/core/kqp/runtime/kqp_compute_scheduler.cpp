@@ -134,12 +134,7 @@ private:
 template<typename T>
 class TParameter;
 
-class TObservableUpdater : IObservable {
-private:
-    bool Update() override {
-        return false;
-    }
-
+class TObservableUpdater {
 public:
     void UpdateAll() {
         TVector<TSet<IObservable*>> queue;
@@ -225,8 +220,8 @@ private:
         T* Get();
     };
 
-    THashMap<TParameterKey, TValueContainer> Params;
     TIntrusiveList<IObservable> ToUpdate_;
+    THashMap<TParameterKey, TValueContainer> Params;
 };
 
 template<typename T>
@@ -467,8 +462,13 @@ public:
     , HardLimitValue(staticLimit, tasksCount, sumCores)
     , ResourceWeightValue(resourceWeight)
     , Calculator_(calculator)
+    , Updater_(updater)
     {
         calculator->Register(this);
+    }
+
+    ~TResourcesWeightLimitValue() {
+        Updater_->ToUpdate(Calculator_);
     }
 
     IObservableValue<double>* Weight() override {
@@ -529,6 +529,7 @@ private:
 private:
     TParameter<double>* ResourceWeightValue;
     TResourcesWeightCalculator* Calculator_;
+    TObservableUpdater* Updater_;
 };
 
 
@@ -682,10 +683,9 @@ struct TComputeScheduler::TImpl {
     THashMap<TString, size_t> GroupId;
     std::vector<std::unique_ptr<TSchedulerEntity::TGroupRecord>> Records;
 
+    TResourcesWeightCalculator ResourceWeightsCalculator;
     TObservableUpdater WeightsUpdater;
     TParameter<double> SumCores{&WeightsUpdater, 1};
-
-    TResourcesWeightCalculator ResourceWeightsCalculator;
 
     enum : ui32 {
         TotalShare = 1,
