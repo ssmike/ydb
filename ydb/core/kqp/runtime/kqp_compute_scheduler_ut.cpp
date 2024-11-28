@@ -99,7 +99,7 @@ Y_UNIT_TEST_SUITE(TComputeScheduler) {
         scheduler.Deregister(handles[1], TMonotonic::Zero() + TDuration::Seconds(2));
         handles.pop_back();
 
-        scheduler.UpdateGroupShare("third", 0.5, TMonotonic::Zero(), 2);
+        scheduler.UpdateGroupShare("third", 0.5, TMonotonic::Zero() + TDuration::Seconds(2), 2);
         handles.push_back(scheduler.Enroll("third", 1, TMonotonic::Zero() + TDuration::Seconds(2)));
         times = RunSimulation(scheduler,
             handles,
